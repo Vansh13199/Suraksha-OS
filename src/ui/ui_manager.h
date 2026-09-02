@@ -1,47 +1,38 @@
 // ============================================================================
 // Suraksha+ Watch OS — UI Manager
-// LVGL initialization, screen management, and navigation
+// U8g2-based screen management for SH1106 128x64 OLED
 // ============================================================================
 #ifndef UI_MANAGER_H
 #define UI_MANAGER_H
 
 #include <Arduino.h>
-#include <lvgl.h>
+#include <U8g2lib.h>
 
 enum class Screen {
     WATCHFACE,
     SOS_ACTIVE,
     HEALTH,
-    APPS_MENU,
-    SETTINGS,
-    NOTIFICATIONS,
-    BATTERY,
-    BLE_STATUS,
-    ACTIVITY,
-    AI_ASSISTANT,
-    STOPWATCH,
-    TIMER,
-    ALARM,
-    FIND_PHONE
+    SYSTEM_INFO
 };
+
+// Total number of auto-cycling screens (excludes SOS which is an overlay)
+#define SCREEN_CYCLE_COUNT  3
+#define SCREEN_CYCLE_MS     5000    // Auto-cycle every 5 seconds
 
 class UIManager {
 public:
     static UIManager& getInstance();
 
     void init();
-    void update();  // Call lv_timer_handler
+    void update();  // Draw current screen to OLED
 
     // Screen navigation
     void showScreen(Screen screen);
-    void goBack();
+    void nextScreen();
     Screen getCurrentScreen() const { return _currentScreen; }
 
-    // SOS overlay
+    // SOS overlay — overrides normal screen cycle
     void showSOSOverlay(bool show);
-
-    // Notifications
-    void showNotificationPopup(const char* title, const char* body);
 
     // Force refresh
     void refresh();
@@ -49,20 +40,16 @@ public:
 private:
     UIManager() = default;
 
-    void _createScreens();
-
     Screen _currentScreen = Screen::WATCHFACE;
-    Screen _previousScreen = Screen::WATCHFACE;
-
-    // Screen objects
-    lv_obj_t* _scrWatchface = nullptr;
-    lv_obj_t* _scrSOS = nullptr;
-    lv_obj_t* _scrHealth = nullptr;
-    lv_obj_t* _scrApps = nullptr;
-    lv_obj_t* _scrSettings = nullptr;
-    lv_obj_t* _scrNotifications = nullptr;
-
+    bool _sosOverride = false;
     bool _initialized = false;
+
+    // Auto-cycle state
+    uint32_t _lastCycleMs = 0;
+    uint8_t _cycleIndex = 0;
+
+    // Screen cycle order
+    static const Screen _cycleScreens[SCREEN_CYCLE_COUNT];
 };
 
 #endif // UI_MANAGER_H

@@ -1,6 +1,6 @@
 // ============================================================================
 // Suraksha+ Watch OS — Hardware Configuration
-// Target: Seeed XIAO ESP32S3 + Round Display
+// Target: Seeed XIAO ESP32S3 + SH1106 128x64 OLED
 // ============================================================================
 #ifndef HARDWARE_CONFIG_H
 #define HARDWARE_CONFIG_H
@@ -17,43 +17,21 @@
 #define WATCH_FLASH_MB          8
 
 // ============================================================================
-// Display — GC9A01 Round TFT (240x240)
+// Display — SH1106 128x64 OLED (I2C)
 // ============================================================================
-#define DISPLAY_WIDTH           240
-#define DISPLAY_HEIGHT          240
-#define DISPLAY_RADIUS          120     // Circular display radius
+#define DISPLAY_WIDTH           128
+#define DISPLAY_HEIGHT          64
+#define OLED_I2C_ADDR           0x3C    // SH1106 I2C address
 
-// SPI Pins (defined in platformio.ini build flags for TFT_eSPI)
-#define PIN_DISPLAY_MOSI        9
-#define PIN_DISPLAY_SCLK        7
-#define PIN_DISPLAY_CS          1
-#define PIN_DISPLAY_DC          2
-#define PIN_DISPLAY_RST         3
-#define PIN_DISPLAY_BL          6       // Backlight (PWM capable)
-
-// Backlight PWM
-#define DISPLAY_BL_CHANNEL      0       // LEDC channel
-#define DISPLAY_BL_FREQ         5000    // PWM frequency (Hz)
-#define DISPLAY_BL_RESOLUTION   8       // 8-bit (0-255)
-#define DISPLAY_BL_DEFAULT      180     // Default brightness (0-255)
-#define DISPLAY_BL_MIN          10      // Minimum visible brightness
-#define DISPLAY_BL_MAX          255     // Maximum brightness
+// OLED shares the same I2C bus as sensors (SDA=5, SCL=4)
+// No separate display pins needed — all via I2C
 
 // ============================================================================
-// Touch — CST816S (Seeed Round Display)
+// I2C Bus — Shared by OLED + Sensors (MAX30102 + MPU6050)
+// XIAO ESP32-S3 wiring: SDA = D4/GPIO5, SCL = D5/GPIO6
 // ============================================================================
-#define TOUCH_ENABLED           1
-#define TOUCH_I2C_ADDR          0x15    // CST816S default address
-#define PIN_TOUCH_SDA           5       // Shared I2C bus
-#define PIN_TOUCH_SCL           4       // Shared I2C bus (Note: differs from sensor I2C)
-#define PIN_TOUCH_INT           D7      // Touch interrupt pin
-#define PIN_TOUCH_RST           -1      // No dedicated reset (or connect to display RST)
-
-// ============================================================================
-// I2C Bus — Sensors (MAX30102 + MPU6050)
-// ============================================================================
-#define PIN_SENSOR_SDA          5
-#define PIN_SENSOR_SCL          4
+#define PIN_SENSOR_SDA          5       // D4 on XIAO ESP32-S3
+#define PIN_SENSOR_SCL          6       // D5 on XIAO ESP32-S3
 #define I2C_SPEED               400000  // 400kHz Fast Mode
 
 // ============================================================================
@@ -116,17 +94,16 @@
 // ============================================================================
 // Power Management
 // ============================================================================
-#define SCREEN_TIMEOUT_DEFAULT_MS   10000   // 10 seconds
+#define SCREEN_TIMEOUT_DEFAULT_MS   0       // 0 = always on (no auto-off)
 #define SCREEN_DIM_TIMEOUT_MS       5000    // Dim 5s before off
 #define DEEP_SLEEP_TIMEOUT_MS       300000  // 5 minutes of inactivity
-#define WAKEUP_TOUCH_THRESHOLD      40      // Capacitive touch wakeup
+#define OLED_DEFAULT_CONTRAST       200     // Default OLED contrast (0-255)
 
 // ============================================================================
 // FreeRTOS Task Configuration
 // ============================================================================
 #define TASK_STACK_SAFETY       4096
 #define TASK_STACK_SENSOR       4096
-#define TASK_STACK_TOUCH        2048
 #define TASK_STACK_UI           8192
 #define TASK_STACK_BLE          4096
 #define TASK_STACK_COMMS        8192
@@ -134,15 +111,13 @@
 
 #define TASK_PRIORITY_SAFETY    6       // Highest — SOS engine
 #define TASK_PRIORITY_SENSOR    5       // Sensor reading
-#define TASK_PRIORITY_TOUCH     5       // Touch input
-#define TASK_PRIORITY_UI        4       // LVGL rendering
+#define TASK_PRIORITY_UI        4       // U8g2 rendering
 #define TASK_PRIORITY_BLE       3       // Bluetooth
 #define TASK_PRIORITY_COMMS     2       // WiFi/HTTP
 #define TASK_PRIORITY_APP       1       // Background apps
 
 #define TASK_CORE_SAFETY        0
 #define TASK_CORE_SENSOR        0
-#define TASK_CORE_TOUCH         0
 #define TASK_CORE_UI            1
 #define TASK_CORE_BLE           0
 #define TASK_CORE_COMMS         1

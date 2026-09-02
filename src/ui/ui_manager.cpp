@@ -1,15 +1,20 @@
 // ============================================================================
 // Suraksha+ Watch OS — UI Manager Implementation
+// U8g2-based rendering for SH1106 128x64 OLED
 // ============================================================================
 #include "ui_manager.h"
-#include "theme.h"
 #include "screens/watchface_screen.h"
 #include "screens/sos_screen.h"
 #include "screens/health_screen.h"
-#include "screens/apps_menu_screen.h"
-#include "screens/settings_screen.h"
+#include "screens/system_info_screen.h"
 #include "../drivers/display_driver.h"
-#include "../config/hardware_config.h"
+
+// Auto-cycle screen order
+const Screen UIManager::_cycleScreens[SCREEN_CYCLE_COUNT] = {
+    Screen::WATCHFACE,
+    Screen::HEALTH,
+    Screen::SYSTEM_INFO
+};
 
 UIManager& UIManager::getInstance() {
     static UIManager instance;
@@ -17,121 +22,84 @@ UIManager& UIManager::getInstance() {
 }
 
 void UIManager::init() {
-    Serial.println("[UI] Initializing UI manager...");
+    Serial.println("[UI] Initializing UI manager (U8g2)...");
 
-    // Initialize LVGL
-    lv_init();
-    Serial.println("[UI] LVGL initialized");
-
-    // Initialize display driver (registers with LVGL)
+    // Initialize display driver
     DisplayDriver::getInstance().init();
 
-    // Apply theme
-    lv_disp_t* disp = DisplayDriver::getInstance().getLvDisplay();
-    if (disp) {
-        Theme::applyDarkTheme(disp);
-    }
-
-    // Create initial screens
-    _createScreens();
-
-    // Show watchface first
-    showScreen(Screen::WATCHFACE);
-
+    _lastCycleMs = millis();
+    _cycleIndex = 0;
+    _currentScreen = Screen::WATCHFACE;
     _initialized = true;
-    Serial.println("[UI] ✅ UI manager ready");
+
+    Serial.println("[UI] ✅ UI manager ready (SH1106 128x64)");
 }
 
 void UIManager::update() {
     if (!_initialized) return;
-    lv_timer_handler();
-}
 
-void UIManager::showScreen(Screen screen) {
-    _previousScreen = _currentScreen;
-    _currentScreen = screen;
+    U8G2_SH1106_128X64_NONAME_F_HW_I2C* u8g2 = DisplayDriver::getInstance().getU8g2();
+    if (!u8g2) return;
 
-    lv_obj_t* target = nullptr;
+    // Auto-cycle screens (unless SOS is active)
+    if (!_sosOverride) {
+        uint32_t now = millis();
+        if (now - _lastCycleMs >= SCREEN_CYCLE_MS) {
+            _lastCycleMs = now;
+            _cycleIndex = (_cycleIndex + 1) % SCREEN_CYCLE_COUNT;
+            _currentScreen = _cycleScreens[_cycleIndex];
+        }
+    }
 
-    switch (screen) {
+    // Clear buffer
+    u8g2->clearBuffer();
+
+    // Draw the current screen
+    switch (_currentScreen) {
         case Screen::WATCHFACE:
-            if (!_scrWatchface) {
-                _scrWatchface = WatchfaceScreen::create();
-            }
-            WatchfaceScreen::update(_scrWatchface);
-            target = _scrWatchface;
+            WatchfaceScreen::draw(u8g2);
             break;
 
         case Screen::SOS_ACTIVE:
-            if (!_scrSOS) {
-                _scrSOS = SOSScreen::create();
-            }
-            SOSScreen::update(_scrSOS);
-            target = _scrSOS;
+            SOSScreen::draw(u8g2);
             break;
 
         case Screen::HEALTH:
-            if (!_scrHealth) {
-                _scrHealth = HealthScreen::create();
-            }
-            HealthScreen::update(_scrHealth);
-            target = _scrHealth;
+            HealthScreen::draw(u8g2);
             break;
 
-        case Screen::APPS_MENU:
-            if (!_scrApps) {
-                _scrApps = AppsMenuScreen::create();
-            }
-            target = _scrApps;
+        case Screen::SYSTEM_INFO:
+            SystemInfoScreen::draw(u8g2);
             break;
-
-        case Screen::SETTINGS:
-            if (!_scrSettings) {
-                _scrSettings = SettingsScreen::create();
-            }
-            target = _scrSettings;
-            break;
-
-        default:
-            return;
     }
 
-    if (target) {
-        lv_scr_load_anim(target, LV_SCR_LOAD_ANIM_FADE_ON, 200, 0, false);
-    }
+    // Send buffer to OLED
+    u8g2->sendBuffer();
 }
 
-void UIManager::goBack() {
-    showScreen(_previousScreen);
+void UIManager::showScreen(Screen screen) {
+    _currentScreen = screen;
+    _lastCycleMs = millis(); // Reset cycle timer
+}
+
+void UIManager::nextScreen() {
+    if (!_sosOverride) {
+        _cycleIndex = (_cycleIndex + 1) % SCREEN_CYCLE_COUNT;
+        _currentScreen = _cycleScreens[_cycleIndex];
+        _lastCycleMs = millis();
+    }
 }
 
 void UIManager::showSOSOverlay(bool show) {
+    _sosOverride = show;
     if (show) {
-        showScreen(Screen::SOS_ACTIVE);
+        _currentScreen = Screen::SOS_ACTIVE;
     } else {
-        showScreen(Screen::WATCHFACE);
+        _currentScreen = Screen::WATCHFACE;
+        _lastCycleMs = millis();
     }
 }
 
-void UIManager::showNotificationPopup(const char* title, const char* body) {
-    // Create a temporary message box overlay
-    lv_obj_t* mbox = lv_msgbox_create(NULL, title, body, NULL, true);
-    lv_obj_center(mbox);
-    lv_obj_set_style_bg_color(mbox, Theme::COLOR_SURFACE, 0);
-    lv_obj_set_style_text_color(mbox, Theme::COLOR_TEXT, 0);
-
-    // Auto-dismiss after 5 seconds
-    lv_obj_add_event_cb(mbox, [](lv_event_t* e) {
-        lv_obj_t* obj = lv_event_get_current_target(e);
-        lv_msgbox_close(obj);
-    }, LV_EVENT_CLICKED, NULL);
-}
-
 void UIManager::refresh() {
-    lv_obj_invalidate(lv_scr_act());
-}
-
-void UIManager::_createScreens() {
-    // Screens are lazily created on first show
-    Serial.println("[UI] Screens will be created on demand");
+    update();
 }

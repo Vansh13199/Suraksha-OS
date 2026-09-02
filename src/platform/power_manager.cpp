@@ -1,9 +1,11 @@
 // ============================================================================
 // Suraksha+ Watch OS — Power Manager Implementation
+// Updated for SH1106 OLED (no backlight PWM — uses U8g2 power save/contrast)
 // ============================================================================
 #include "power_manager.h"
 #include "../config/hardware_config.h"
 #include "../config/app_config.h"
+#include "../drivers/display_driver.h"
 #include <Preferences.h>
 #include <esp_sleep.h>
 #include <driver/rtc_io.h>
@@ -14,23 +16,18 @@ PowerManager& PowerManager::getInstance() {
 }
 
 void PowerManager::init() {
-    // Setup backlight PWM
-    ledcSetup(DISPLAY_BL_CHANNEL, DISPLAY_BL_FREQ, DISPLAY_BL_RESOLUTION);
-    ledcAttachPin(PIN_DISPLAY_BL, DISPLAY_BL_CHANNEL);
-
-    // Load saved brightness
+    // Load saved settings
     Preferences prefs;
     prefs.begin(NVS_NAMESPACE, true);
-    _brightness = prefs.getUChar(NVS_KEY_BRIGHTNESS, DISPLAY_BL_DEFAULT);
+    _brightness = prefs.getUChar(NVS_KEY_BRIGHTNESS, OLED_DEFAULT_CONTRAST);
     _screenTimeoutMs = prefs.getUInt(NVS_KEY_SCREEN_TIMEOUT, SCREEN_TIMEOUT_DEFAULT_MS);
     _powerSave = prefs.getBool(NVS_KEY_POWER_SAVE, false);
     prefs.end();
 
-    setDisplayBrightness(_brightness);
     _lastActivityMs = millis();
     _detectWakeReason();
 
-    Serial.printf("[PWR] Init OK | Brightness: %d | Timeout: %dms | PowerSave: %d\n",
+    Serial.printf("[PWR] Init OK | Contrast: %d | Timeout: %dms | PowerSave: %d\n",
                   _brightness, _screenTimeoutMs, _powerSave);
 }
 
@@ -42,6 +39,9 @@ void PowerManager::update() {
 
     uint32_t now = millis();
     uint32_t elapsed = now - _lastActivityMs;
+
+    // If screen timeout is 0, display stays on forever (always-on mode)
+    if (_screenTimeoutMs == 0) return;
 
     switch (_state) {
         case PowerState::ACTIVE:
@@ -61,7 +61,6 @@ void PowerManager::update() {
 
         case PowerState::SCREEN_OFF:
             // Stay in screen-off; could transition to light sleep later
-            // For now, we keep the MCU active for BLE and sensors
             break;
 
         case PowerState::LIGHT_SLEEP:
@@ -117,11 +116,11 @@ void PowerManager::preventSleep(bool prevent) {
 }
 
 void PowerManager::setDisplayBrightness(uint8_t brightness) {
-    _brightness = constrain(brightness, DISPLAY_BL_MIN, DISPLAY_BL_MAX);
+    _brightness = brightness;
     _savedBrightness = _brightness;
 
     if (_displayOn) {
-        ledcWrite(DISPLAY_BL_CHANNEL, _brightness);
+        DisplayDriver::getInstance().setContrast(_brightness);
     }
 
     // Save to NVS
@@ -133,7 +132,8 @@ void PowerManager::setDisplayBrightness(uint8_t brightness) {
 
 void PowerManager::displayOn() {
     if (!_displayOn) {
-        ledcWrite(DISPLAY_BL_CHANNEL, _brightness);
+        DisplayDriver::getInstance().powerOn();
+        DisplayDriver::getInstance().setContrast(_brightness);
         _displayOn = true;
         Serial.println("[PWR] Display ON");
     }
@@ -141,7 +141,7 @@ void PowerManager::displayOn() {
 
 void PowerManager::displayOff() {
     if (_displayOn) {
-        ledcWrite(DISPLAY_BL_CHANNEL, 0);
+        DisplayDriver::getInstance().powerOff();
         _displayOn = false;
         Serial.println("[PWR] Display OFF");
     }
@@ -151,7 +151,7 @@ void PowerManager::setPowerSaveMode(bool enabled) {
     _powerSave = enabled;
 
     if (enabled) {
-        // Reduce brightness
+        // Reduce contrast
         if (_brightness > 100) {
             setDisplayBrightness(100);
         }
@@ -161,7 +161,7 @@ void PowerManager::setPowerSaveMode(bool enabled) {
         // Restore settings
         Preferences prefs;
         prefs.begin(NVS_NAMESPACE, true);
-        _brightness = prefs.getUChar(NVS_KEY_BRIGHTNESS, DISPLAY_BL_DEFAULT);
+        _brightness = prefs.getUChar(NVS_KEY_BRIGHTNESS, OLED_DEFAULT_CONTRAST);
         _screenTimeoutMs = prefs.getUInt(NVS_KEY_SCREEN_TIMEOUT, SCREEN_TIMEOUT_DEFAULT_MS);
         prefs.end();
         setDisplayBrightness(_brightness);
@@ -230,12 +230,11 @@ void PowerManager::shutdown() {
     Serial.println("[PWR] Shutting down...");
     displayOff();
     // Enter deep sleep with no wake sources = effective shutdown
-    // Only USB plug-in or reset button will wake it
     esp_deep_sleep_start();
 }
 
 void PowerManager::_setupWakeSources() {
-    // Touch pin as wake source
+    // Boot button as wake source
     esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_BOOT_BUTTON, 0); // LOW = pressed
 
     // Timer wake (periodic sensor check)
@@ -243,9 +242,10 @@ void PowerManager::_setupWakeSources() {
 }
 
 void PowerManager::_dimDisplay() {
-    uint8_t dimBrightness = _brightness / 3;
-    if (dimBrightness < DISPLAY_BL_MIN) dimBrightness = DISPLAY_BL_MIN;
-    ledcWrite(DISPLAY_BL_CHANNEL, dimBrightness);
+    // Reduce OLED contrast for dimming effect
+    uint8_t dimContrast = _brightness / 4;
+    if (dimContrast < 10) dimContrast = 10;
+    DisplayDriver::getInstance().setContrast(dimContrast);
 }
 
 void PowerManager::_detectWakeReason() {

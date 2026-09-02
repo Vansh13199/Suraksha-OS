@@ -1,128 +1,69 @@
 // ============================================================================
 // Suraksha+ Watch OS — SOS Screen Implementation
+// 128x64 OLED layout using U8g2 — inverted for maximum attention
 // ============================================================================
 #include "sos_screen.h"
-#include "../theme.h"
 #include "../../safety/safety_engine.h"
 #include "../../sensors/sensor_manager.h"
 
-static lv_obj_t* lblSOSTitle = nullptr;
-static lv_obj_t* lblSOSTimer = nullptr;
-static lv_obj_t* lblSOSGPS = nullptr;
-static lv_obj_t* lblSOSBPM = nullptr;
-static lv_obj_t* lblSOSCancel = nullptr;
-static lv_timer_t* sosTimer = nullptr;
+namespace SOSScreen {
 
-static void _sosTimerCb(lv_timer_t* timer) {
-    lv_obj_t* screen = (lv_obj_t*)timer->user_data;
-    SOSScreen::update(screen);
-}
+    void draw(U8G2_SH1106_128X64_NONAME_F_HW_I2C* u8g2) {
+        SafetyEngine& safety = SafetyEngine::getInstance();
+        SensorManager& sensors = SensorManager::getInstance();
 
-lv_obj_t* SOSScreen::create() {
-    lv_obj_t* scr = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(scr, Theme::COLOR_DANGER_DARK, 0);
-    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
-    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+        // --- Flashing effect: alternate between normal and inverted ---
+        bool flash = (millis() / 500) % 2 == 0;
 
-    // --- SOS Title (pulsing) ---
-    lblSOSTitle = lv_label_create(scr);
-    lv_obj_set_style_text_font(lblSOSTitle, Theme::FONT_TITLE, 0);
-    lv_obj_set_style_text_color(lblSOSTitle, Theme::COLOR_TEXT, 0);
-    lv_obj_align(lblSOSTitle, LV_ALIGN_CENTER, 0, -45);
-    lv_label_set_text(lblSOSTitle, "SOS ACTIVE");
+        // --- SOS ACTIVE banner (inverted rectangle for attention) ---
+        if (flash) {
+            u8g2->drawBox(0, 0, 128, 14);  // Filled rectangle
+            u8g2->setDrawColor(0);          // Draw black text on white bg
+        }
+        u8g2->setFont(u8g2_font_7x14B_tr);
+        u8g2->drawStr(20, 12, "!! SOS ACTIVE !!");
+        u8g2->setDrawColor(1);  // Reset to white-on-black
 
-    // Pulsing animation on title
-    lv_anim_t anim;
-    lv_anim_init(&anim);
-    lv_anim_set_var(&anim, lblSOSTitle);
-    lv_anim_set_values(&anim, LV_OPA_COVER, LV_OPA_50);
-    lv_anim_set_time(&anim, 800);
-    lv_anim_set_playback_time(&anim, 800);
-    lv_anim_set_repeat_count(&anim, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_set_exec_cb(&anim, [](void* obj, int32_t v) {
-        lv_obj_set_style_text_opa((lv_obj_t*)obj, v, 0);
-    });
-    lv_anim_start(&anim);
+        // --- Timer (duration since SOS) ---
+        uint32_t durationMs = safety.getSOSManager().getDurationMs();
+        uint32_t seconds = durationMs / 1000;
+        uint32_t minutes = seconds / 60;
+        seconds %= 60;
 
-    // --- Timer (duration since SOS) ---
-    lblSOSTimer = lv_label_create(scr);
-    lv_obj_set_style_text_font(lblSOSTimer, Theme::FONT_XLARGE, 0);
-    lv_obj_set_style_text_color(lblSOSTimer, Theme::COLOR_TEXT, 0);
-    lv_obj_align(lblSOSTimer, LV_ALIGN_CENTER, 0, -5);
-    lv_label_set_text(lblSOSTimer, "00:00");
+        char timerBuf[8];
+        snprintf(timerBuf, sizeof(timerBuf), "%02d:%02d", minutes, seconds);
 
-    // --- GPS coordinates ---
-    lblSOSGPS = lv_label_create(scr);
-    lv_obj_set_style_text_font(lblSOSGPS, Theme::FONT_SMALL, 0);
-    lv_obj_set_style_text_color(lblSOSGPS, lv_color_hex(0xFFCDD2), 0);
-    lv_obj_align(lblSOSGPS, LV_ALIGN_CENTER, 0, 25);
-    lv_label_set_text(lblSOSGPS, "GPS: --");
+        u8g2->setFont(u8g2_font_logisoso16_tn);
+        int timerWidth = u8g2->getStrWidth(timerBuf);
+        u8g2->drawStr((128 - timerWidth) / 2, 34, timerBuf);
 
-    // --- Heart rate ---
-    lblSOSBPM = lv_label_create(scr);
-    lv_obj_set_style_text_font(lblSOSBPM, Theme::FONT_NORMAL, 0);
-    lv_obj_set_style_text_color(lblSOSBPM, lv_color_hex(0xFFCDD2), 0);
-    lv_obj_align(lblSOSBPM, LV_ALIGN_CENTER, 0, 45);
-    lv_label_set_text(lblSOSBPM, "BPM: --");
+        // --- GPS coordinates ---
+        u8g2->setFont(u8g2_font_5x7_tr);
+        if (sensors.hasGPSFix()) {
+            char gpsBuf[28];
+            snprintf(gpsBuf, sizeof(gpsBuf), "GPS:%.4f,%.4f",
+                     sensors.getLatitude(), sensors.getLongitude());
+            u8g2->drawStr(0, 44, gpsBuf);
+        } else {
+            u8g2->drawStr(0, 44, "GPS: Acquiring...");
+        }
 
-    // --- Cancel instruction ---
-    lblSOSCancel = lv_label_create(scr);
-    lv_obj_set_style_text_font(lblSOSCancel, Theme::FONT_SMALL, 0);
-    lv_obj_set_style_text_color(lblSOSCancel, lv_color_hex(0xFFAB91), 0);
-    lv_obj_align(lblSOSCancel, LV_ALIGN_BOTTOM_MID, 0, -30);
-    lv_label_set_text(lblSOSCancel, "HOLD 5s TO CANCEL");
+        // --- Heart rate ---
+        float bpm = sensors.getBPM();
+        char bpmBuf[16];
+        if (bpm > 0) {
+            snprintf(bpmBuf, sizeof(bpmBuf), "BPM: %.0f", bpm);
+        } else {
+            snprintf(bpmBuf, sizeof(bpmBuf), "BPM: --");
+        }
+        u8g2->drawStr(0, 53, bpmBuf);
 
-    // --- Update timer ---
-    sosTimer = lv_timer_create(_sosTimerCb, 1000, scr);
-
-    return scr;
-}
-
-void SOSScreen::update(lv_obj_t* screen) {
-    if (!screen) return;
-
-    SafetyEngine& safety = SafetyEngine::getInstance();
-    SensorManager& sensors = SensorManager::getInstance();
-
-    // Update duration timer
-    uint32_t durationMs = safety.getSOSManager().getDurationMs();
-    uint32_t seconds = durationMs / 1000;
-    uint32_t minutes = seconds / 60;
-    seconds %= 60;
-
-    char timerBuf[8];
-    snprintf(timerBuf, sizeof(timerBuf), "%02d:%02d", minutes, seconds);
-    if (lblSOSTimer) lv_label_set_text(lblSOSTimer, timerBuf);
-
-    // Update GPS
-    if (sensors.hasGPSFix()) {
-        char gpsBuf[32];
-        snprintf(gpsBuf, sizeof(gpsBuf), "GPS: %.4f, %.4f",
-                 sensors.getLatitude(), sensors.getLongitude());
-        if (lblSOSGPS) lv_label_set_text(lblSOSGPS, gpsBuf);
-    } else {
-        if (lblSOSGPS) lv_label_set_text(lblSOSGPS, "GPS: Acquiring...");
+        // --- Cancel instruction ---
+        u8g2->drawHLine(0, 55, 128);
+        u8g2->setFont(u8g2_font_5x7_tr);
+        const char* cancelMsg = "HOLD 5s TO CANCEL";
+        int cancelWidth = u8g2->getStrWidth(cancelMsg);
+        u8g2->drawStr((128 - cancelWidth) / 2, 63, cancelMsg);
     }
 
-    // Update BPM
-    float bpm = sensors.getBPM();
-    char bpmBuf[16];
-    if (bpm > 0) {
-        snprintf(bpmBuf, sizeof(bpmBuf), "BPM: %.0f", bpm);
-    } else {
-        snprintf(bpmBuf, sizeof(bpmBuf), "BPM: --");
-    }
-    if (lblSOSBPM) lv_label_set_text(lblSOSBPM, bpmBuf);
-}
-
-void SOSScreen::destroy(lv_obj_t* screen) {
-    if (sosTimer) {
-        lv_timer_del(sosTimer);
-        sosTimer = nullptr;
-    }
-    lblSOSTitle = nullptr;
-    lblSOSTimer = nullptr;
-    lblSOSGPS = nullptr;
-    lblSOSBPM = nullptr;
-    lblSOSCancel = nullptr;
-}
+} // namespace SOSScreen

@@ -1,20 +1,21 @@
 // ============================================================================
 // Suraksha+ Watch OS — Main Entry Point
 // Target: Seeed XIAO ESP32S3
+// Display: SH1106 128x64 OLED (I2C)
 // ============================================================================
 //
 // FreeRTOS Task Layout:
-//   Core 0: Safety Engine (P6), Sensor Reading (P5), Touch/Gesture (P5), BLE (P3)
-//   Core 1: LVGL UI (P4), Communication (P2), App Background (P1)
+//   Core 0: Safety Engine (P6), Sensor Reading (P5), BLE (P3)
+//   Core 1: UI (P4), Communication (P2), App Background (P1)
 //
 // Boot Sequence:
-//   1. Hardware Init (I2C, SPI, GPIO)
+//   1. Hardware Init (I2C, GPIO)
 //   2. Platform Init (Storage, Watchdog, Power)
-//   3. Driver Init (Display, Touch, Vibration)
+//   3. Driver Init (Display, Vibration)
 //   4. Sensor Init (HR, IMU, Battery, GPS)
 //   5. Safety Engine Init
 //   6. Communication Init (BLE)
-//   7. UI Init (LVGL + Screens)
+//   7. UI Init (U8g2 + Screens)
 //   8. Start FreeRTOS Tasks
 //
 // ============================================================================
@@ -35,7 +36,6 @@
 
 // Drivers
 #include "drivers/display_driver.h"
-#include "drivers/touch_driver.h"
 #include "drivers/vibration.h"
 #include "drivers/buzzer.h"
 
@@ -59,7 +59,6 @@
 // ============================================================================
 static TaskHandle_t taskSafetyHandle = NULL;
 static TaskHandle_t taskSensorHandle = NULL;
-static TaskHandle_t taskTouchHandle = NULL;
 static TaskHandle_t taskUIHandle = NULL;
 static TaskHandle_t taskBLEHandle = NULL;
 static TaskHandle_t taskCommsHandle = NULL;
@@ -92,68 +91,10 @@ void taskSensor(void* parameter) {
 }
 
 // ============================================================================
-// Touch / Gesture Task (Core 0)
-// ============================================================================
-void taskTouch(void* parameter) {
-    Serial.println("[TASK] Touch/gesture task started on Core 0");
-
-    while (true) {
-        // Read touch from CST816S
-        TouchDriver& touch = TouchDriver::getInstance();
-        TouchPoint tp = touch.read();
-
-        // Feed to gesture detector
-        SafetyEngine::getInstance().getGestureDetector().feedTouch(tp.pressed);
-
-        // Handle screen gestures (swipe navigation)
-        if (tp.gesture != TouchGesture::NONE) {
-            // Wake screen on any touch
-            PowerManager::getInstance().resetInactivityTimer();
-
-            // Navigate based on gesture
-            UIManager& ui = UIManager::getInstance();
-            switch (tp.gesture) {
-                case TouchGesture::SWIPE_LEFT:
-                    // Next screen
-                    if (ui.getCurrentScreen() == Screen::WATCHFACE) {
-                        ui.showScreen(Screen::HEALTH);
-                    } else if (ui.getCurrentScreen() == Screen::HEALTH) {
-                        ui.showScreen(Screen::APPS_MENU);
-                    }
-                    break;
-
-                case TouchGesture::SWIPE_RIGHT:
-                    // Previous screen
-                    if (ui.getCurrentScreen() == Screen::APPS_MENU) {
-                        ui.showScreen(Screen::HEALTH);
-                    } else if (ui.getCurrentScreen() == Screen::HEALTH) {
-                        ui.showScreen(Screen::WATCHFACE);
-                    }
-                    break;
-
-                case TouchGesture::SWIPE_DOWN:
-                    // Notifications (TODO)
-                    break;
-
-                case TouchGesture::SWIPE_UP:
-                    // Quick settings (TODO)
-                    break;
-
-                default:
-                    break;
-            }
-        }
-
-        Watchdog::getInstance().feed("touch");
-        vTaskDelay(pdMS_TO_TICKS(15)); // ~66Hz
-    }
-}
-
-// ============================================================================
-// LVGL UI Task (Core 1)
+// U8g2 UI Task (Core 1)
 // ============================================================================
 void taskUI(void* parameter) {
-    Serial.println("[TASK] LVGL UI started on Core 1");
+    Serial.println("[TASK] U8g2 UI started on Core 1");
 
     while (true) {
         UIManager::getInstance().update();
@@ -282,32 +223,33 @@ void setup() {
     delay(500);
 
     Serial.println();
-    Serial.println("╔══════════════════════════════════════════╗");
-    Serial.println("║                                          ║");
-    Serial.println("║    SURAKSHA+ WATCH OS v" WATCH_OS_VERSION "            ║");
-    Serial.println("║    Target: XIAO ESP32S3                  ║");
-    Serial.println("║                                          ║");
-    Serial.println("╚══════════════════════════════════════════╝");
+    Serial.println("+===========================================+");
+    Serial.println("|                                           |");
+    Serial.println("|    SURAKSHA+ WATCH OS v" WATCH_OS_VERSION "             |");
+    Serial.println("|    Target: XIAO ESP32S3                   |");
+    Serial.println("|    Display: SH1106 128x64 OLED            |");
+    Serial.println("|                                           |");
+    Serial.println("+===========================================+");
     Serial.println();
 
     // === 1. Platform Init ===
-    Serial.println("── Phase 1: Platform ──");
+    Serial.println("-- Phase 1: Platform --");
     Storage::getInstance().init();
     Watchdog::getInstance().init();
     PowerManager::getInstance().init();
     SystemMonitor::getInstance().init();
 
     // === 2. Hardware Init ===
-    Serial.println("\n── Phase 2: Hardware ──");
+    Serial.println("\n-- Phase 2: Hardware --");
 
-    // I2C for sensors
+    // I2C for OLED display + sensors (shared bus)
     Wire.begin(PIN_SENSOR_SDA, PIN_SENSOR_SCL);
     Wire.setClock(I2C_SPEED);
     Serial.printf("[I2C] Bus initialized: SDA=%d, SCL=%d @ %dHz\n",
                   PIN_SENSOR_SDA, PIN_SENSOR_SCL, I2C_SPEED);
 
     // === 3. Driver Init ===
-    Serial.println("\n── Phase 3: Drivers ──");
+    Serial.println("\n-- Phase 3: Drivers --");
     Vibration::getInstance().init();
     Buzzer::getInstance().init();
 
@@ -315,37 +257,33 @@ void setup() {
     Vibration::getInstance().play(HapticPattern::SUCCESS);
 
     // === 4. Sensor Init ===
-    Serial.println("\n── Phase 4: Sensors ──");
+    Serial.println("\n-- Phase 4: Sensors --");
     SensorManager::getInstance().init();
 
     // === 5. Safety Engine Init ===
-    Serial.println("\n── Phase 5: Safety Engine ──");
+    Serial.println("\n-- Phase 5: Safety Engine --");
     SafetyEngine::getInstance().init();
     SafetyEngine::getInstance().setEventCallback(onSafetyEvent);
 
     // === 6. Communication Init ===
-    Serial.println("\n── Phase 6: Communication ──");
+    Serial.println("\n-- Phase 6: Communication --");
     BleService::getInstance().init();
     BleService::getInstance().onReceive(onBleMessage);
     BleProtocol::getInstance().init();
     PhoneBridge::getInstance().init();
 
     // === 7. UI Init ===
-    Serial.println("\n── Phase 7: UI ──");
+    Serial.println("\n-- Phase 7: UI --");
     UIManager::getInstance().init();
-    TouchDriver::getInstance().init();
 
     // === 8. Start FreeRTOS Tasks ===
-    Serial.println("\n── Phase 8: FreeRTOS Tasks ──");
+    Serial.println("\n-- Phase 8: FreeRTOS Tasks --");
 
     xTaskCreatePinnedToCore(taskSafety, "safety", TASK_STACK_SAFETY,
                             NULL, TASK_PRIORITY_SAFETY, &taskSafetyHandle, TASK_CORE_SAFETY);
 
     xTaskCreatePinnedToCore(taskSensor, "sensor", TASK_STACK_SENSOR,
                             NULL, TASK_PRIORITY_SENSOR, &taskSensorHandle, TASK_CORE_SENSOR);
-
-    xTaskCreatePinnedToCore(taskTouch, "touch", TASK_STACK_TOUCH,
-                            NULL, TASK_PRIORITY_TOUCH, &taskTouchHandle, TASK_CORE_TOUCH);
 
     xTaskCreatePinnedToCore(taskUI, "ui", TASK_STACK_UI,
                             NULL, TASK_PRIORITY_UI, &taskUIHandle, TASK_CORE_UI);
@@ -360,17 +298,16 @@ void setup() {
     Watchdog& wdt = Watchdog::getInstance();
     wdt.registerTask("safety", taskSafetyHandle, WDT_TASK_TIMEOUT_MS);
     wdt.registerTask("sensor", taskSensorHandle, WDT_TASK_TIMEOUT_MS);
-    wdt.registerTask("touch", taskTouchHandle, WDT_TASK_TIMEOUT_MS);
     wdt.registerTask("ui", taskUIHandle, WDT_TASK_TIMEOUT_MS * 2);
     wdt.registerTask("ble", taskBLEHandle, WDT_TASK_TIMEOUT_MS * 3);
     wdt.registerTask("comms", taskCommsHandle, WDT_TASK_TIMEOUT_MS * 3);
 
     Serial.println();
-    Serial.println("╔══════════════════════════════════════════╗");
-    Serial.println("║    ✅ SURAKSHA+ WATCH OS READY           ║");
-    Serial.printf("║    Free Heap: %6d bytes                ║\n", ESP.getFreeHeap());
-    Serial.printf("║    Free PSRAM: %5d KB                   ║\n", ESP.getFreePsram() / 1024);
-    Serial.println("╚══════════════════════════════════════════╝");
+    Serial.println("+===========================================+");
+    Serial.println("|    SURAKSHA+ WATCH OS READY               |");
+    Serial.printf("|    Free Heap: %6d bytes                 |\n", ESP.getFreeHeap());
+    Serial.printf("|    Free PSRAM: %5d KB                    |\n", ESP.getFreePsram() / 1024);
+    Serial.println("+===========================================+");
 }
 
 // ============================================================================

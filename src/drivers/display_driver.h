@@ -1,13 +1,13 @@
 // ============================================================================
 // Suraksha+ Watch OS — Display Driver
-// GC9A01 240x240 Round TFT via TFT_eSPI + LVGL Integration
+// SH1106 128x64 OLED via U8g2 (I2C)
 // ============================================================================
 #ifndef DISPLAY_DRIVER_H
 #define DISPLAY_DRIVER_H
 
 #include <Arduino.h>
-#include <TFT_eSPI.h>
-#include <lvgl.h>
+#include <U8g2lib.h>
+#include <Wire.h>
 #include "../config/hardware_config.h"
 
 class DisplayDriver {
@@ -15,27 +15,25 @@ public:
     static DisplayDriver& getInstance();
 
     void init();
-    TFT_eSPI* getTft() { return &_tft; }
 
-    // LVGL display driver
-    lv_disp_t* getLvDisplay() { return _lvDisp; }
+    // Get the U8g2 instance for drawing
+    U8G2_SH1106_128X64_NONAME_F_HW_I2C* getU8g2() { return &_u8g2; }
+
+    // Display power control
+    void powerOn();
+    void powerOff();
+    bool isPoweredOn() const { return _poweredOn; }
+
+    // Contrast control (replaces backlight brightness)
+    void setContrast(uint8_t contrast);
+    uint8_t getContrast() const { return _contrast; }
 
 private:
-    DisplayDriver() = default;
+    DisplayDriver() : _u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE) {}
 
-    // LVGL flush callback (static for C API)
-    static void _lvglFlushCb(lv_disp_drv_t* disp, const lv_area_t* area, lv_color_t* color_p);
-
-    TFT_eSPI _tft;
-    lv_disp_t* _lvDisp = nullptr;
-    lv_disp_draw_buf_t _drawBuf;
-    lv_disp_drv_t _dispDrv;
-
-    // Double-buffered draw buffers (allocated in PSRAM)
-    lv_color_t* _buf1 = nullptr;
-    lv_color_t* _buf2 = nullptr;
-
-    static const uint32_t DRAW_BUF_SIZE = DISPLAY_WIDTH * 40; // 40 lines
+    U8G2_SH1106_128X64_NONAME_F_HW_I2C _u8g2;
+    bool _poweredOn = false;
+    uint8_t _contrast = OLED_DEFAULT_CONTRAST;
 };
 
 #endif // DISPLAY_DRIVER_H

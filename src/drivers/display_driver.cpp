@@ -1,5 +1,6 @@
 // ============================================================================
 // Suraksha+ Watch OS — Display Driver Implementation
+// SH1106 128x64 OLED via U8g2 (I2C)
 // ============================================================================
 #include "display_driver.h"
 
@@ -9,74 +10,53 @@ DisplayDriver& DisplayDriver::getInstance() {
 }
 
 void DisplayDriver::init() {
-    Serial.println("[DISP] Initializing GC9A01 display...");
+    Serial.println("[DISP] Initializing SH1106 128x64 OLED...");
+    Serial.printf("[DISP] I2C pins: SDA=%d, SCL=%d, Addr=0x%02X\n",
+                  PIN_SENSOR_SDA, PIN_SENSOR_SCL, OLED_I2C_ADDR);
 
-    // Initialize TFT
-    _tft.begin();
-    _tft.setRotation(0);       // 0° rotation for circular display
-    _tft.fillScreen(TFT_BLACK);
-    _tft.setSwapBytes(true);
+    // Use the Wire instance that was already initialized with correct pins
+    // U8g2 begin() would call Wire.begin() with default pins, so we use
+    // setBusClock + begin explicitly to keep our pin configuration
+    _u8g2.setI2CAddress(OLED_I2C_ADDR * 2); // U8g2 uses 8-bit I2C address
+    _u8g2.begin();
 
-    Serial.printf("[DISP] TFT initialized: %dx%d\n", DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    // Re-initialize Wire with our pins since U8g2 begin() may override them
+    Wire.begin(PIN_SENSOR_SDA, PIN_SENSOR_SCL);
+    Wire.setClock(I2C_SPEED);
 
-    // Allocate LVGL draw buffers in PSRAM
-    _buf1 = (lv_color_t*)ps_malloc(DRAW_BUF_SIZE * sizeof(lv_color_t));
-    _buf2 = (lv_color_t*)ps_malloc(DRAW_BUF_SIZE * sizeof(lv_color_t));
+    // Set default contrast
+    _u8g2.setContrast(_contrast);
 
-    if (!_buf1 || !_buf2) {
-        Serial.println("[DISP] ❌ PSRAM allocation failed! Falling back to SRAM...");
-        if (_buf1) free(_buf1);
-        if (_buf2) free(_buf2);
-        // Smaller buffers in SRAM
-        _buf1 = (lv_color_t*)malloc(DISPLAY_WIDTH * 10 * sizeof(lv_color_t));
-        _buf2 = nullptr;
-    }
+    // Clear and show a brief splash
+    _u8g2.clearBuffer();
+    _u8g2.setFont(u8g2_font_6x10_tr);
+    _u8g2.drawStr(18, 28, "SURAKSHA+ OS");
+    _u8g2.drawStr(30, 42, "v" "1.0.0");
+    _u8g2.sendBuffer();
 
-    if (!_buf1) {
-        Serial.println("[DISP] ❌ CRITICAL: Cannot allocate display buffer!");
-        return;
-    }
+    _poweredOn = true;
 
-    // Initialize LVGL draw buffer
-    if (_buf2) {
-        lv_disp_draw_buf_init(&_drawBuf, _buf1, _buf2, DRAW_BUF_SIZE);
-        Serial.println("[DISP] Double-buffered (PSRAM)");
-    } else {
-        lv_disp_draw_buf_init(&_drawBuf, _buf1, nullptr, DISPLAY_WIDTH * 10);
-        Serial.println("[DISP] Single-buffered (SRAM fallback)");
-    }
+    Serial.printf("[DISP] ✅ SH1106 OLED initialized: %dx%d\n",
+                  DISPLAY_WIDTH, DISPLAY_HEIGHT);
+}
 
-    // Initialize LVGL display driver
-    lv_disp_drv_init(&_dispDrv);
-    _dispDrv.hor_res = DISPLAY_WIDTH;
-    _dispDrv.ver_res = DISPLAY_HEIGHT;
-    _dispDrv.flush_cb = _lvglFlushCb;
-    _dispDrv.draw_buf = &_drawBuf;
-    _dispDrv.user_data = this;
-
-    // Round display: set rounder callback if needed
-    // _dispDrv.rounder_cb = nullptr;
-
-    _lvDisp = lv_disp_drv_register(&_dispDrv);
-
-    if (_lvDisp) {
-        Serial.println("[DISP] ✅ LVGL display driver registered");
-    } else {
-        Serial.println("[DISP] ❌ LVGL display driver registration failed!");
+void DisplayDriver::powerOn() {
+    if (!_poweredOn) {
+        _u8g2.setPowerSave(0);
+        _poweredOn = true;
+        Serial.println("[DISP] OLED power ON");
     }
 }
 
-void DisplayDriver::_lvglFlushCb(lv_disp_drv_t* disp, const lv_area_t* area, lv_color_t* color_p) {
-    DisplayDriver* self = (DisplayDriver*)disp->user_data;
-    TFT_eSPI* tft = &self->_tft;
+void DisplayDriver::powerOff() {
+    if (_poweredOn) {
+        _u8g2.setPowerSave(1);
+        _poweredOn = false;
+        Serial.println("[DISP] OLED power OFF");
+    }
+}
 
-    uint32_t w = (area->x2 - area->x1 + 1);
-    uint32_t h = (area->y2 - area->y1 + 1);
-
-    tft->startWrite();
-    tft->setAddrWindow(area->x1, area->y1, w, h);
-    tft->pushColors((uint16_t*)&color_p->full, w * h, true);
-    tft->endWrite();
-
-    lv_disp_flush_ready(disp);
+void DisplayDriver::setContrast(uint8_t contrast) {
+    _contrast = contrast;
+    _u8g2.setContrast(contrast);
 }

@@ -1,16 +1,14 @@
 // ============================================================================
 // Suraksha+ Watch OS — Watch Face Screen
-// Primary screen with time, date, status indicators
+// 128x64 OLED layout: time, date, BPM, steps, battery, BLE status
 // ============================================================================
 #ifndef WATCHFACE_SCREEN_H
 #define WATCHFACE_SCREEN_H
 
-#include <lvgl.h>
+#include <U8g2lib.h>
 
 namespace WatchfaceScreen {
-    lv_obj_t* create();
-    void update(lv_obj_t* screen);
-    void destroy(lv_obj_t* screen);
+    void draw(U8G2_SH1106_128X64_NONAME_F_HW_I2C* u8g2);
 }
 
 #endif // WATCHFACE_SCREEN_H
