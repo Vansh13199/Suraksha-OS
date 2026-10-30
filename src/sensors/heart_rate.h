@@ -1,43 +1,42 @@
 // ============================================================================
-// Suraksha+ Watch OS — Heart Rate Sensor (MAX30102)
-// Ported from existing final.ino with improvements
+// Suraksha+ Watch OS — Heart Rate Sensor (ESP-NOW Remote)
+// Receives HR data from external Seeed XIAO ESP32S3 via ESP-NOW
 // ============================================================================
 #ifndef HEART_RATE_H
 #define HEART_RATE_H
 
 #include <Arduino.h>
-#include "MAX30105.h"
-#include "heartRate.h"
 #include "../config/app_config.h"
 
 struct HeartRateData {
-    float bpm;              // Current average BPM
-    float rawBpm;           // Latest single reading
-    float spo2;             // SpO2 percentage (if available)
-    bool fingerPresent;     // Is finger on sensor?
+    float bpm;              // Current smoothed BPM (from remote sensor)
+    float rawBpm;           // Latest raw reading from remote sensor
+    float spo2;             // SpO2 percentage
+    bool fingerPresent;     // Is finger on remote sensor?
     uint8_t confidence;     // Signal quality (0-100)
-    uint32_t timestamp;     // Last valid reading time
+    uint32_t timestamp;     // Last valid reading time (local millis)
+    bool sensorOnline;      // Is the remote sensor module reachable?
+    int8_t rssi;            // ESP-NOW signal strength
+    uint8_t sensorBattery;  // Remote sensor battery level
 };
 
 class HeartRateSensor {
 public:
     bool init();
-    void update();          // Call at sensor polling rate
+    void update();          // Pulls latest data from ESPNowReceiver
     HeartRateData getData() const { return _data; }
     float getAvgBPM() const;
-    bool isReading() const { return _data.fingerPresent; }
+    bool isReading() const { return _data.fingerPresent && _data.sensorOnline; }
+    bool isSensorOnline() const { return _data.sensorOnline; }
 
 private:
-    MAX30105 _sensor;
     HeartRateData _data = {};
 
-    // Rolling BPM average buffer (matching existing firmware)
-    static const int BUF_SIZE = HR_SAMPLE_WINDOW;
-    float _bpmBuf[BUF_SIZE] = {};
-    int _bufIdx = 0;
-    int _bufCount = 0;
+    // EMA smoothing for BPM (applied on top of remote sensor's averaging)
+    float _smoothedBpm = 0;
+    float _lastBestBpm = 0;
+    bool _firstReading = true;
 
-    unsigned long _lastBeat = 0;
     bool _initialized = false;
 };
 

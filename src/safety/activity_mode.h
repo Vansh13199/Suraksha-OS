@@ -17,11 +17,16 @@ public:
     bool isActive() const { return _active; }
     uint32_t getRemainingSeconds() const;
     uint32_t getTotalDurationSeconds() const { return _durationSeconds; }
+    uint32_t getDefaultDurationSeconds() const { return _defaultDurationSeconds; }
     uint32_t getElapsedSeconds() const;
+
+    // Allows dynamic timer updates via Bluetooth or UI
+    void setDuration(uint32_t durationSeconds);
 
 private:
     bool _active = false;
     uint32_t _durationSeconds = 0;
+    uint32_t _defaultDurationSeconds = ACTIVITY_DEFAULT_DURATION_S;
     uint32_t _startMs = 0;
     uint32_t _endMs = 0;
 };

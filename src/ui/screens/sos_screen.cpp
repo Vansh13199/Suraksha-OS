@@ -1,6 +1,6 @@
 // ============================================================================
 // Suraksha+ Watch OS — SOS Screen Implementation
-// 128x64 OLED layout using U8g2 — inverted for maximum attention
+// 240x240 Color TFT layout for LilyGo T-Watch S3
 // ============================================================================
 #include "sos_screen.h"
 #include "../../safety/safety_engine.h"
@@ -8,62 +8,73 @@
 
 namespace SOSScreen {
 
-    void draw(U8G2_SH1106_128X64_NONAME_F_HW_I2C* u8g2) {
+    void draw(TFT_eSPI* tft) {
+        if (!tft) return;
+
         SafetyEngine& safety = SafetyEngine::getInstance();
         SensorManager& sensors = SensorManager::getInstance();
 
-        // --- Flashing effect: alternate between normal and inverted ---
+        // Alternate background/header flashing for emergency attention
         bool flash = (millis() / 500) % 2 == 0;
 
-        // --- SOS ACTIVE banner (inverted rectangle for attention) ---
-        if (flash) {
-            u8g2->drawBox(0, 0, 128, 14);  // Filled rectangle
-            u8g2->setDrawColor(0);          // Draw black text on white bg
-        }
-        u8g2->setFont(u8g2_font_7x14B_tr);
-        u8g2->drawStr(20, 12, "!! SOS ACTIVE !!");
-        u8g2->setDrawColor(1);  // Reset to white-on-black
+        tft->fillScreen(TFT_BLACK);
 
-        // --- Timer (duration since SOS) ---
+        // --- Top Alert Banner ---
+        uint16_t bannerBg = flash ? TFT_RED : 0x8800; // Bright red / dark red
+        tft->fillRect(0, 0, 240, 50, bannerBg);
+
+        tft->setTextDatum(MC_DATUM);
+        tft->setTextColor(TFT_WHITE, bannerBg);
+        tft->drawString("! EMERGENCY SOS !", 120, 25, 4);
+
+        // --- Timer (duration since SOS triggered) ---
         uint32_t durationMs = safety.getSOSManager().getDurationMs();
         uint32_t seconds = durationMs / 1000;
         uint32_t minutes = seconds / 60;
         seconds %= 60;
 
-        char timerBuf[8];
-        snprintf(timerBuf, sizeof(timerBuf), "%02d:%02d", minutes, seconds);
+        char timerBuf[16];
+        snprintf(timerBuf, sizeof(timerBuf), "%02lu:%02lu", (unsigned long)minutes, (unsigned long)seconds);
 
-        u8g2->setFont(u8g2_font_logisoso16_tn);
-        int timerWidth = u8g2->getStrWidth(timerBuf);
-        u8g2->drawStr((128 - timerWidth) / 2, 34, timerBuf);
+        tft->setTextColor(TFT_YELLOW, TFT_BLACK);
+        tft->drawString(timerBuf, 120, 85, 6); // Large font
 
-        // --- GPS coordinates ---
-        u8g2->setFont(u8g2_font_5x7_tr);
+        // --- GPS Coordinates Card ---
+        tft->fillRoundRect(15, 120, 210, 50, 6, 0x18E3);
+        tft->drawRoundRect(15, 120, 210, 50, 6, TFT_RED);
+
+        tft->setTextDatum(TL_DATUM);
         if (sensors.hasGPSFix()) {
-            char gpsBuf[28];
-            snprintf(gpsBuf, sizeof(gpsBuf), "GPS:%.4f,%.4f",
-                     sensors.getLatitude(), sensors.getLongitude());
-            u8g2->drawStr(0, 44, gpsBuf);
+            char latBuf[32];
+            char lonBuf[32];
+            snprintf(latBuf, sizeof(latBuf), "LAT: %.5f", sensors.getLatitude());
+            snprintf(lonBuf, sizeof(lonBuf), "LON: %.5f", sensors.getLongitude());
+            tft->setTextColor(TFT_GREEN, 0x18E3);
+            tft->drawString(latBuf, 25, 126, 2);
+            tft->drawString(lonBuf, 25, 146, 2);
         } else {
-            u8g2->drawStr(0, 44, "GPS: Acquiring...");
+            tft->setTextColor(TFT_ORANGE, 0x18E3);
+            tft->drawString("GPS: Acquiring fix...", 25, 126, 2);
+            tft->setTextColor(TFT_DARKGREY, 0x18E3);
+            tft->drawString("Broadcasting BLE beacon", 25, 146, 2);
         }
 
-        // --- Heart rate ---
+        // --- Heart Rate & Alert Info ---
         float bpm = sensors.getBPM();
-        char bpmBuf[16];
+        char hrBuf[32];
         if (bpm > 0) {
-            snprintf(bpmBuf, sizeof(bpmBuf), "BPM: %.0f", bpm);
+            snprintf(hrBuf, sizeof(hrBuf), "HEART RATE: %.0f BPM", bpm);
+            tft->setTextColor(TFT_RED, TFT_BLACK);
         } else {
-            snprintf(bpmBuf, sizeof(bpmBuf), "BPM: --");
+            snprintf(hrBuf, sizeof(hrBuf), "HEART RATE: ---");
+            tft->setTextColor(TFT_DARKGREY, TFT_BLACK);
         }
-        u8g2->drawStr(0, 53, bpmBuf);
+        tft->setTextDatum(MC_DATUM);
+        tft->drawString(hrBuf, 120, 185, 2);
 
-        // --- Cancel instruction ---
-        u8g2->drawHLine(0, 55, 128);
-        u8g2->setFont(u8g2_font_5x7_tr);
-        const char* cancelMsg = "HOLD 5s TO CANCEL";
-        int cancelWidth = u8g2->getStrWidth(cancelMsg);
-        u8g2->drawStr((128 - cancelWidth) / 2, 63, cancelMsg);
+        // --- Instructions to cancel ---
+        tft->setTextColor(TFT_WHITE, TFT_BLACK);
+        tft->drawString("HOLD 3 SECONDS TO CANCEL", 120, 215, 2);
     }
 
 } // namespace SOSScreen

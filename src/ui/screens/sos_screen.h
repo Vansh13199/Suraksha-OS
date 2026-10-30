@@ -1,14 +1,14 @@
 // ============================================================================
 // Suraksha+ Watch OS — SOS Screen
-// 128x64 OLED layout: SOS alert with timer, GPS, BPM
+// 240x240 TFT layout: emergency alert, timer, GPS, HR, status
 // ============================================================================
 #ifndef SOS_SCREEN_H
 #define SOS_SCREEN_H
 
-#include <U8g2lib.h>
+#include <TFT_eSPI.h>
 
 namespace SOSScreen {
-    void draw(U8G2_SH1106_128X64_NONAME_F_HW_I2C* u8g2);
+    void draw(TFT_eSPI* tft);
 }
 
 #endif // SOS_SCREEN_H

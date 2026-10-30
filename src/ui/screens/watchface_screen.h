@@ -1,14 +1,14 @@
 // ============================================================================
 // Suraksha+ Watch OS — Watch Face Screen
-// 128x64 OLED layout: time, date, BPM, steps, battery, BLE status
+// 240x240 TFT layout: time, date, BPM, steps, battery, BLE, ESP-NOW link
 // ============================================================================
 #ifndef WATCHFACE_SCREEN_H
 #define WATCHFACE_SCREEN_H
 
-#include <U8g2lib.h>
+#include <TFT_eSPI.h>
 
 namespace WatchfaceScreen {
-    void draw(U8G2_SH1106_128X64_NONAME_F_HW_I2C* u8g2);
+    void draw(TFT_eSPI* tft);
 }
 
 #endif // WATCHFACE_SCREEN_H

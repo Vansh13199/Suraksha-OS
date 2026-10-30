@@ -1,82 +1,79 @@
 // ============================================================================
-// Suraksha+ Watch OS — Heart Rate Sensor Implementation
-// Ported from final.ino with the exact same MAX30102 configuration
+// Suraksha+ Watch OS — Heart Rate Sensor Implementation (ESP-NOW Remote)
+// Pulls HR data from the ESP-NOW receiver (data sent by Seeed XIAO ESP32S3)
 // ============================================================================
 #include "heart_rate.h"
 #include "../config/hardware_config.h"
+#include "../comms/espnow_receiver.h"
 
 bool HeartRateSensor::init() {
-    // Initialize MAX30102 (same config as existing firmware)
-    if (!_sensor.begin(Wire, I2C_SPEED_FAST)) {
-        Serial.println("[HR] ❌ MAX30102 not found!");
-        _initialized = false;
-        return false;
-    }
+    Serial.println("[HR] Initializing remote heart rate sensor...");
+    Serial.println("[HR] Data source: Seeed XIAO ESP32S3 via ESP-NOW");
 
-    // Exact same setup as final.ino:
-    // sensor.setup(ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange)
-    _sensor.setup(0xFF, 8, 2, 200, 411, 16384);
-    _sensor.setPulseAmplitudeIR(0xFF);
-    _sensor.setPulseAmplitudeRed(0x4F);
-    _sensor.setPulseAmplitudeGreen(0);
-
+    // The ESP-NOW receiver is initialized separately in main.cpp
+    // We just need to verify it's available
     _initialized = true;
-    Serial.println("[HR] ✅ MAX30102 initialized");
+    _firstReading = true;
+    _smoothedBpm = 0;
+
+    Serial.println("[HR] ✅ Remote HR sensor interface ready");
+    Serial.println("[HR] Waiting for ESP-NOW packets from sensor module...");
     return true;
 }
 
 void HeartRateSensor::update() {
     if (!_initialized) return;
 
-    _sensor.check();
+    // Get latest data from ESP-NOW receiver
+    ESPNowReceiver& receiver = ESPNowReceiver::getInstance();
+    ESPNowHRData espnowData = receiver.getData();
 
-    while (_sensor.available()) {
-        long ir = _sensor.getIR();
-        _sensor.nextSample();
+    // Map ESP-NOW data to our HeartRateData struct
+    _data.sensorOnline  = espnowData.senderOnline;
+    _data.rssi          = espnowData.rssi;
+    _data.sensorBattery = espnowData.senderBattery;
 
-        // Check if finger is on sensor (same threshold as existing firmware)
-        if (ir < HR_IR_THRESHOLD) {
-            _data.fingerPresent = false;
-            _bufCount = 0;
-            _bufIdx = 0;
-            continue;
-        }
-
-        _data.fingerPresent = true;
-
-        // Check for heartbeat (uses SparkFun library's built-in algorithm)
-        if (checkForBeat(ir)) {
-            unsigned long now = millis();
-            unsigned long dt = now - _lastBeat;
-            _lastBeat = now;
-
-            // Validate beat interval (same range as existing firmware)
-            if (dt > HR_BEAT_MIN_INTERVAL_MS && dt < HR_BEAT_MAX_INTERVAL_MS) {
-                float bpm = 60.0f / (dt / 1000.0f);
-
-                // Validate BPM range
-                if (bpm >= HR_MIN_VALID_BPM && bpm <= HR_MAX_VALID_BPM) {
-                    _data.rawBpm = bpm;
-
-                    // Add to rolling average buffer
-                    _bpmBuf[_bufIdx] = bpm;
-                    _bufIdx = (_bufIdx + 1) % BUF_SIZE;
-                    if (_bufCount < BUF_SIZE) _bufCount++;
-
-                    _data.bpm = getAvgBPM();
-                    _data.timestamp = now;
-                    _data.confidence = min(100, (int)(_bufCount * 100 / BUF_SIZE));
-                }
-            }
-        }
+    if (!espnowData.senderOnline) {
+        // Sensor module is offline
+        _data.fingerPresent = false;
+        _data.rawBpm = 0;
+        _data.spo2 = 0;
+        _data.confidence = 0;
+        _firstReading = true;
+        // Maintain last best reading so UI does not abruptly clear
+        _data.bpm = _lastBestBpm;
+        return;
     }
+
+    _data.fingerPresent = espnowData.fingerPresent;
+    _data.rawBpm        = espnowData.rawBpm;
+    _data.spo2          = 0; // SpO2 removed
+    _data.confidence    = espnowData.confidence;
+    _data.timestamp     = espnowData.lastReceived;
+
+    if (!espnowData.fingerPresent) {
+        // Finger removed: reset live reading and clear false high reading
+        _firstReading = true;
+        _data.rawBpm = 0;
+        if (_lastBestBpm > HR_ANOMALY_HIGH_BPM) {
+            _lastBestBpm = 0;
+            _smoothedBpm = 0;
+        }
+        _data.bpm = _lastBestBpm;
+        return;
+    }
+
+    if (espnowData.bpm >= 40.0f && espnowData.bpm <= 220.0f) {
+        // Direct real-time update: exact BPM at the exact same time
+        _smoothedBpm = espnowData.bpm;
+        _lastBestBpm = espnowData.bpm;
+        _firstReading = false;
+    }
+
+    // Always maintain last best reading
+    _data.bpm = _lastBestBpm;
 }
 
 float HeartRateSensor::getAvgBPM() const {
-    if (_bufCount == 0) return 0.0f;
-    float sum = 0;
-    for (int i = 0; i < _bufCount; i++) {
-        sum += _bpmBuf[i];
-    }
-    return sum / _bufCount;
+    return _data.bpm;
 }

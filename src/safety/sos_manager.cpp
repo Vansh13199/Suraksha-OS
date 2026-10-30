@@ -7,12 +7,13 @@
 void SOSManager::init() {
     _active = false;
     memset(_sessionId, 0, sizeof(_sessionId));
+    _lastTriggerMs = 0;
     Serial.println("[SOS] SOS manager initialized");
 }
 
 void SOSManager::trigger(const char* reason) {
-    // Check cooldown (same as existing firmware)
-    if (millis() - _lastTriggerMs < SOS_COOLDOWN_MS) {
+    // Check cooldown
+    if (_lastTriggerMs > 0 && (millis() - _lastTriggerMs < SOS_COOLDOWN_MS)) {
         Serial.println("[SOS] Cooldown active — ignoring trigger");
         return;
     }
@@ -42,6 +43,8 @@ void SOSManager::stop() {
 
     _active = false;
     _reason = "";
+    // Cooldown starts NOW so no new session can immediately start
+    _lastTriggerMs = millis();
 }
 
 void SOSManager::update() {
@@ -54,9 +57,6 @@ void SOSManager::update() {
 
         Serial.printf("[SOS] Live update #%d (Session: %s, Duration: %ds)\n",
                       _updateCount, _sessionId, getDurationMs() / 1000);
-
-        // Note: The actual HTTP/BLE transmission is handled by the
-        // communication layer, not here. The SOS manager just manages state.
     }
 }
 
@@ -66,7 +66,6 @@ uint32_t SOSManager::getDurationMs() const {
 }
 
 void SOSManager::_generateUUID(char* out) {
-    // Same UUID generation as existing firmware
     const char hex[] = "0123456789abcdef";
     for (int i = 0; i < 36; i++) {
         if (i == 8 || i == 13 || i == 18 || i == 23) {

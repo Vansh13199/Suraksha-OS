@@ -60,6 +60,7 @@ void BleService::init() {
 
     // Initialize BLE
     BLEDevice::init(BLE_DEVICE_NAME);
+    BLEDevice::setMTU(512);
 
     // Create server
     _pServer = BLEDevice::createServer();
@@ -78,7 +79,7 @@ void BleService::init() {
     // RX Characteristic (Phone → Watch): Write
     _pRxChar = pService->createCharacteristic(
         BLE_CHAR_RX_UUID,
-        BLECharacteristic::PROPERTY_WRITE
+        BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR
     );
     _pRxChar->setCallbacks(new WatchRxCallbacks(this));
 
@@ -90,6 +91,7 @@ void BleService::init() {
     pAdvertising->addServiceUUID(BLE_SERVICE_UUID);
     pAdvertising->setScanResponse(BLE_SCAN_RESPONSE);
     pAdvertising->setMinPreferred(0x06);
+    pAdvertising->setMinPreferred(0x12); // Help with iPhone connection issues
     BLEDevice::startAdvertising();
 
     Serial.printf("[BLE] ✅ Advertising as '%s'\n", BLE_DEVICE_NAME);

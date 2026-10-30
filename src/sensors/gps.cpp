@@ -14,8 +14,8 @@ bool GPSSensor::init() {
 #endif
 
     // Initialize with zero coordinates
-    _data.latitude = 0.0;
-    _data.longitude = 0.0;
+    _data.latitude = 30.767677;
+    _data.longitude = 76.573944;
     _data.hasFix = false;
     _data.source = GPSSource::NONE;
 
@@ -56,6 +56,13 @@ void GPSSensor::setPhoneGPS(double lat, double lon, double alt, float speed) {
     _data.hasFix = (lat != 0.0 || lon != 0.0);
     _data.source = GPSSource::PHONE_BLE;
     _data.timestamp = millis();
+}
+
+void GPSSensor::resetToDefault() {
+    _data.latitude = 30.767677;
+    _data.longitude = 76.573944;
+    _data.hasFix = false;
+    _data.source = GPSSource::NONE;
 }
 
 void GPSSensor::getLatStr(char* buf, size_t len) const {

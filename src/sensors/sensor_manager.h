@@ -12,7 +12,7 @@
 #include "gps.h"
 
 enum class SensorPowerMode {
-    ACTIVE,         // Full rate: HR=continuous, IMU=50Hz, Battery=30s
+    ACTIVE,         // Full rate: HR=continuous (via ESP-NOW), IMU=50Hz, Battery=30s
     POWER_SAVE,     // Reduced: HR=periodic, IMU=10Hz, Battery=60s
     SLEEP           // Minimal: HR=off, IMU=tap-only, Battery=5min
 };
@@ -36,6 +36,7 @@ public:
 
     // Convenience accessors (thread-safe)
     float getBPM() const;
+    float getSpO2() const;
     float getMotionScore() const;
     uint32_t getSteps() const;
     uint8_t getBatteryPercent() const;
@@ -47,6 +48,12 @@ public:
     // Sensor health
     bool isHeartRateAvailable() const { return _hrAvailable; }
     bool isIMUAvailable() const { return _imuAvailable; }
+
+    // Remote sensor status
+    bool isHRSensorOnline() const;
+    bool isHRSensorFingerPresent() const;
+    int8_t getHRSensorRSSI() const;
+    uint8_t getHRSensorBattery() const;
 
 private:
     SensorManager() = default;

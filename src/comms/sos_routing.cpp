@@ -14,101 +14,110 @@ SOSRouting& SOSRouting::getInstance() {
     return instance;
 }
 
-SOSRoute SOSRouting::getBestRoute() const {
-    // Priority 1: BLE → Phone (phone has internet + GPS)
-    if (BleService::getInstance().isConnected()) {
-        return SOSRoute::BLE_TO_PHONE;
-    }
+#include "wifi_manager.h"
 
-    // Priority 2: Direct WiFi → AWS
+SOSRoute SOSRouting::getBestRoute() const {
     if (WiFi.status() == WL_CONNECTED) {
         return SOSRoute::WIFI_DIRECT;
     }
-
-    // Priority 3: Store and forward
+    if (BleService::getInstance().isConnected()) {
+        return SOSRoute::BLE_TO_PHONE;
+    }
     return SOSRoute::STORE_AND_FORWARD;
 }
 
 bool SOSRouting::sendSOS(const char* phoneNumber, const char* sessionId,
                          const char* lat, const char* lon, float heartRate) {
-    SOSRoute route = getBestRoute();
+    Serial.printf("[ROUTE] 🚨 sendSOS called: phone=%s session=%s\n", phoneNumber, sessionId);
+    bool sent = false;
 
-    Serial.printf("[ROUTE] SOS via %s\n",
-                  route == SOSRoute::BLE_TO_PHONE ? "BLE→Phone" :
-                  route == SOSRoute::WIFI_DIRECT ? "WiFi→AWS" : "Store&Forward");
-
-    switch (route) {
-        case SOSRoute::BLE_TO_PHONE:
-            return _sendViaBLE(sessionId, lat, lon);
-
-        case SOSRoute::WIFI_DIRECT:
-            return _sendViaWiFi(phoneNumber, sessionId, lat, lon, heartRate);
-
-        case SOSRoute::STORE_AND_FORWARD:
-            // TODO: Store in NVS queue for later transmission
-            Serial.println("[ROUTE] ⚠️ No connection — SOS queued");
-            return false;
-
-        default:
-            return false;
+    // 1. If BLE mobile is connected, immediately notify mobile
+    if (BleService::getInstance().isConnected()) {
+        Serial.println("[ROUTE] 📱 Mobile BLE connected -> Dispatching via Bluetooth");
+        if (_sendViaBLE(sessionId, lat, lon)) {
+            sent = true;
+        }
     }
+
+    // 2. If WiFi is NOT connected, attempt immediate connection
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("[ROUTE] 🌐 WiFi disconnected. Reconnecting to hotspot for SOS dispatch...");
+        WifiManager::getInstance().connect(4000);
+    }
+
+    // 3. Send directly to AWS API via WiFi
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("[ROUTE] 🌐 WiFi connected -> Sending SOS directly to AWS API");
+        if (_sendViaWiFi(phoneNumber, sessionId, lat, lon, heartRate)) {
+            sent = true;
+            Serial.println("[ROUTE] ✅ SOS successfully dispatched to AWS!");
+        }
+    } else if (!sent) {
+        Serial.println("[ROUTE] ⚠️ Neither WiFi nor Bluetooth connected — SOS queued locally");
+    }
+
+    return sent;
 }
 
 bool SOSRouting::stopSOS(const char* sessionId) {
-    SOSRoute route = getBestRoute();
+    Serial.printf("[ROUTE] 🛑 stopSOS called for session: %s\n", sessionId);
+    bool stopped = false;
 
-    if (route == SOSRoute::BLE_TO_PHONE) {
+    if (BleService::getInstance().isConnected()) {
+        Serial.println("[ROUTE] 📱 Sending SOS:STOP to Mobile via Bluetooth");
         BleService::getInstance().send(BLE_MSG_SOS_STOP);
-        return true;
+        stopped = true;
     }
 
-    if (route == SOSRoute::WIFI_DIRECT) {
+    if (WiFi.status() != WL_CONNECTED) {
+        WifiManager::getInstance().connect(3000);
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("[ROUTE] 🌐 Sending STOP to AWS via WiFi");
         char payload[128];
         snprintf(payload, sizeof(payload), "{\"sessionId\":\"%s\"}", sessionId);
-        return _sendViaHTTP(AWS_SOS_STOP_URL, payload);
+        if (_sendViaHTTP(AWS_SOS_STOP_URL, payload)) {
+            stopped = true;
+        }
     }
 
-    return false;
+    return stopped;
 }
 
 bool SOSRouting::sendLiveUpdate(const char* phoneNumber, const char* sessionId,
                                 const char* lat, const char* lon, float heartRate) {
-    SOSRoute route = getBestRoute();
-
-    switch (route) {
-        case SOSRoute::BLE_TO_PHONE:
-            // Send location update via BLE
-            BleService::getInstance().sendFormatted("SOS:UPDATE:%s,%s,%.1f",
-                                                     lat, lon, heartRate);
-            return true;
-
-        case SOSRoute::WIFI_DIRECT:
-            return _sendViaWiFi(phoneNumber, sessionId, lat, lon, heartRate);
-
-        default:
-            return false;
+    if (WiFi.status() == WL_CONNECTED) {
+        return _sendViaWiFi(phoneNumber, sessionId, lat, lon, heartRate);
+    } else if (BleService::getInstance().isConnected()) {
+        BleService::getInstance().sendFormatted("SOS:UPDATE:%s,%s,%.1f",
+                                                 lat, lon, heartRate);
+        return true;
     }
+    return false;
 }
 
 bool SOSRouting::_sendViaBLE(const char* sessionId, const char* lat, const char* lon) {
     BleService& ble = BleService::getInstance();
 
-    // Send SOS:START to phone — phone will handle API call
+    // Send SOS:START to phone — triggers SosProvider on the Flutter mobile app
+    Serial.println("[ROUTE] 📱 Sending SOS:START to mobile via BLE");
     ble.send(BLE_MSG_SOS_START);
-
-    // Also send location data
-    ble.sendFormatted("SOS:LOC:%s,%s", lat, lon);
 
     return true;
 }
 
 bool SOSRouting::_sendViaWiFi(const char* phoneNumber, const char* sessionId,
                               const char* lat, const char* lon, float heartRate) {
-    // Same HTTPS call as existing firmware
+    double latitude = (lat && strlen(lat) > 0) ? atof(lat) : 30.767677;
+    double longitude = (lon && strlen(lon) > 0) ? atof(lon) : 76.573944;
+    if (latitude == 0.0) latitude = 30.767677;
+    if (longitude == 0.0) longitude = 76.573944;
+
     char payload[320];
     snprintf(payload, sizeof(payload),
-        "{\"phoneNumber\":\"%s\",\"sessionId\":\"%s\",\"latitude\":%s,\"longitude\":%s,\"heartRate\":%.1f}",
-        phoneNumber, sessionId, lat, lon, heartRate);
+        "{\"phoneNumber\":\"%s\",\"sessionId\":\"%s\",\"latitude\":%.6f,\"longitude\":%.6f,\"heartRate\":%.1f}",
+        phoneNumber, sessionId, latitude, longitude, heartRate);
 
     return _sendViaHTTP(AWS_SOS_TRIGGER_URL, payload);
 }

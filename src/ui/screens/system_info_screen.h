@@ -1,14 +1,14 @@
 // ============================================================================
 // Suraksha+ Watch OS — System Info Screen
-// 128x64 OLED layout: heap, PSRAM, CPU, BLE, uptime, version
+// 240x240 TFT layout: hardware stats, memory, ESP-NOW link, BLE, uptime
 // ============================================================================
 #ifndef SYSTEM_INFO_SCREEN_H
 #define SYSTEM_INFO_SCREEN_H
 
-#include <U8g2lib.h>
+#include <TFT_eSPI.h>
 
 namespace SystemInfoScreen {
-    void draw(U8G2_SH1106_128X64_NONAME_F_HW_I2C* u8g2);
+    void draw(TFT_eSPI* tft);
 }
 
 #endif // SYSTEM_INFO_SCREEN_H

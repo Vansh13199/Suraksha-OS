@@ -42,6 +42,7 @@ public:
     // Activity mode
     void startActivityMode(uint32_t durationSeconds);
     void stopActivityMode();
+    void setActivityDuration(uint32_t durationSeconds) { _activityMode.setDuration(durationSeconds); }
 
     // Countdown cancel (user tapped during fall detection countdown)
     void cancelCountdown();
@@ -76,6 +77,10 @@ private:
     uint32_t _countdownStartMs = 0;
     uint32_t _countdownDurationMs = 0;
     const char* _countdownReason = nullptr;
+
+    // Cooldown tracking after stopping SOS
+    uint32_t _lastStopMs = 0;
+    uint32_t _hrNormalStartMs = 0;
 };
 
 #endif // SAFETY_ENGINE_H

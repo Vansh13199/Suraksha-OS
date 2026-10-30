@@ -20,6 +20,7 @@ public:
     const char* getReason() const { return _reason; }
     uint32_t getDurationMs() const;
     uint32_t getUpdateCount() const { return _updateCount; }
+    void setLastTriggerMs(uint32_t ms) { _lastTriggerMs = ms; }
 
 private:
     void _generateUUID(char* out);

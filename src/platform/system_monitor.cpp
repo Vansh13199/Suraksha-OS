@@ -4,6 +4,7 @@
 #include "system_monitor.h"
 #include <esp_system.h>
 #include <esp_heap_caps.h>
+#include "../sensors/sensor_manager.h"
 
 SystemMonitor& SystemMonitor::getInstance() {
     static SystemMonitor instance;
@@ -65,5 +66,11 @@ void SystemMonitor::printStatus() const {
                   getCpuFreqMHz(), getCpuTemperature());
     Serial.printf("║ Uptime: %d seconds               ║\n",
                   getUptimeSeconds());
+                  
+    char lat[16], lon[16];
+    SensorManager::getInstance().getGPS().getLatStr(lat, sizeof(lat));
+    SensorManager::getInstance().getGPS().getLonStr(lon, sizeof(lon));
+    Serial.printf("║ GPS: %s, %s\n", lat, lon);
+    
     Serial.println("╚═══════════════════════════════════╝");
 }

@@ -6,10 +6,34 @@
 void ActivityMode::init() {
     _active = false;
     _durationSeconds = 0;
+    _defaultDurationSeconds = ACTIVITY_DEFAULT_DURATION_S;
     Serial.println("[ACT] Activity mode initialized");
 }
 
+void ActivityMode::setDuration(uint32_t durationSeconds) {
+    if (durationSeconds > ACTIVITY_MAX_DURATION_S) {
+        durationSeconds = ACTIVITY_MAX_DURATION_S;
+    }
+    if (durationSeconds == 0) {
+        durationSeconds = 60; // Minimum 1 minute
+    }
+
+    _defaultDurationSeconds = durationSeconds;
+    _durationSeconds = durationSeconds;
+
+    if (_active) {
+        // Dynamically update the active countdown timer
+        _endMs = millis() + (durationSeconds * 1000UL);
+        Serial.printf("[ACT] ⏱ Active countdown timer updated via BLE to %u seconds\n", durationSeconds);
+    } else {
+        Serial.printf("[ACT] ⏱ Default activity timer updated via BLE to %u seconds\n", durationSeconds);
+    }
+}
+
 void ActivityMode::start(uint32_t durationSeconds) {
+    if (durationSeconds == 0) {
+        durationSeconds = _defaultDurationSeconds;
+    }
     if (durationSeconds > ACTIVITY_MAX_DURATION_S) {
         durationSeconds = ACTIVITY_MAX_DURATION_S;
     }
@@ -19,7 +43,7 @@ void ActivityMode::start(uint32_t durationSeconds) {
     _endMs = _startMs + (durationSeconds * 1000UL);
     _active = true;
 
-    Serial.printf("[ACT] ▶ Activity mode ON for %d seconds\n", durationSeconds);
+    Serial.printf("[ACT] ▶ Activity mode ON for %u seconds\n", durationSeconds);
 }
 
 void ActivityMode::stop() {

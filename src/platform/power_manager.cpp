@@ -112,7 +112,7 @@ void PowerManager::preventSleep(bool prevent) {
         setDisplayBrightness(_savedBrightness);
         _state = PowerState::ACTIVE;
     }
-    Serial.printf("[PWR] Sleep prevention: %s\n", prevent ? "ON" : "OFF");
+    // Serial.printf("[PWR] Sleep prevention: %s\n", prevent ? "ON" : "OFF");
 }
 
 void PowerManager::setDisplayBrightness(uint8_t brightness) {

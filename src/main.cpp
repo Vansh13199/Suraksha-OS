@@ -1,217 +1,278 @@
 // ============================================================================
 // Suraksha+ Watch OS — Main Entry Point
-// Target: Seeed XIAO ESP32S3
-// Display: SH1106 128x64 OLED (I2C)
+// Target: watch
 // ============================================================================
-//
-// FreeRTOS Task Layout:
-//   Core 0: Safety Engine (P6), Sensor Reading (P5), BLE (P3)
-//   Core 1: UI (P4), Communication (P2), App Background (P1)
-//
-// Boot Sequence:
-//   1. Hardware Init (I2C, GPIO)
-//   2. Platform Init (Storage, Watchdog, Power)
-//   3. Driver Init (Display, Vibration)
-//   4. Sensor Init (HR, IMU, Battery, GPS)
-//   5. Safety Engine Init
-//   6. Communication Init (BLE)
-//   7. UI Init (U8g2 + Screens)
-//   8. Start FreeRTOS Tasks
-//
+// Architecture:
+//   - Heart rate data arrives via ESP-NOW from Seeed XIAO ESP32S3
+//   - Display: ST7789 240x240 TFT via TFT_eSPI
+//   - PMU: AXP2101 (battery, power rails)
+//   - IMU: BMA423/BMA456 or MPU6050
+//   - Touch: FT6336U capacitive touch
+//   - Comms: BLE to phone, WiFi for NTP/HTTP, ESP-NOW for HR sensor
 // ============================================================================
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <WiFi.h>
+#include <time.h>
+#include <sys/time.h>
 
-// Config
+// --- Config ---
 #include "config/hardware_config.h"
-#include "config/ble_config.h"
 #include "config/app_config.h"
+#include "config/ble_config.h"
 
-// Platform
-#include "platform/power_manager.h"
-#include "platform/watchdog.h"
+// --- Platform ---
 #include "platform/storage.h"
+#include "platform/watchdog.h"
+#include "platform/power_manager.h"
 #include "platform/system_monitor.h"
 
-// Drivers
+// --- Drivers ---
 #include "drivers/display_driver.h"
 #include "drivers/vibration.h"
-#include "drivers/buzzer.h"
 
-// Sensors
+// --- Sensors ---
 #include "sensors/sensor_manager.h"
 
-// Safety
+// --- Safety ---
 #include "safety/safety_engine.h"
 
-// Communication
+// --- Comms ---
 #include "comms/ble_service.h"
 #include "comms/ble_protocol.h"
-#include "comms/sos_routing.h"
 #include "comms/phone_bridge.h"
+#include "comms/wifi_manager.h"
+#include "comms/sos_routing.h"
+#include "comms/espnow_receiver.h"
 
-// UI
+// --- UI ---
 #include "ui/ui_manager.h"
 
-// ============================================================================
-// Task Handles
-// ============================================================================
-static TaskHandle_t taskSafetyHandle = NULL;
-static TaskHandle_t taskSensorHandle = NULL;
-static TaskHandle_t taskUIHandle = NULL;
-static TaskHandle_t taskBLEHandle = NULL;
-static TaskHandle_t taskCommsHandle = NULL;
+#include <XPowersLib.h>
+
+static XPowersPMU s_pmu;
+
+bool initPMU() {
+    Serial.println("[PMU] Initializing AXP2101 PMU...");
+    if (!s_pmu.init(Wire, PIN_SENSOR_SDA, PIN_SENSOR_SCL, AXP2101_I2C_ADDR)) {
+        Serial.println("[PMU] ⚠️ AXP2101 not responding at 0x34");
+        return false;
+    }
+    Serial.println("[PMU] ✅ AXP2101 initialized!");
+
+    // ALDO1-4: Peripheral power rails (Display backlight, display logic, touch, etc.)
+    s_pmu.setALDO1Voltage(3300);
+    s_pmu.enableALDO1();
+    s_pmu.setALDO2Voltage(3300);
+    s_pmu.enableALDO2();
+    s_pmu.setALDO3Voltage(3300);
+    s_pmu.enableALDO3();
+    s_pmu.setALDO4Voltage(3300);
+    s_pmu.enableALDO4();
+
+    // BLDO1-2: Secondary peripheral power rails (GNSS, Haptic DRV2605)
+    s_pmu.setBLDO1Voltage(3300);
+    s_pmu.enableBLDO1();
+    s_pmu.setBLDO2Voltage(3300);
+    s_pmu.enableBLDO2();
+
+    // Enable Battery & Power measurements on AXP2101
+    s_pmu.enableBattDetection();
+    s_pmu.enableBattVoltageMeasure();
+    s_pmu.enableVbusVoltageMeasure();
+    s_pmu.enableSystemVoltageMeasure();
+
+    Serial.printf("[PMU] Battery: %d%% (%dmV) | VBUS: %s | Charging: %s\n",
+                  s_pmu.getBatteryPercent(), s_pmu.getBattVoltage(),
+                  s_pmu.isVbusIn() ? "YES" : "NO",
+                  s_pmu.isCharging() ? "YES" : "NO");
+
+    return true;
+}
+
+// Global PMU battery helpers for BatterySensor
+int getPMUBatteryPercent() {
+    return s_pmu.getBatteryPercent();
+}
+
+uint16_t getPMUBatteryVoltage() {
+    return s_pmu.getBattVoltage();
+}
+
+bool isPMUCharging() {
+    return s_pmu.isCharging() || s_pmu.isVbusIn();
+}
+
+// Global I2C mutex (shared between sensors, display, PMU)
+SemaphoreHandle_t g_i2cMutex = nullptr;
+
+// Safety Event Callback
+void onSafetyEvent(SafetyState state, const char* message) {
+    UIManager& ui = UIManager::getInstance();
+
+    switch (state) {
+        case SafetyState::SOS_ACTIVE: {
+            Serial.printf("[MAIN] 🚨 SOS Activated: %s\n", message ? message : "UNKNOWN");
+            ui.showSOSOverlay(true);
+            Vibration::getInstance().play(HapticPattern::SOS_CONFIRM);
+
+            // Dispatch SOS alert via network (BLE + WiFi/AWS)
+            SensorManager& sensors = SensorManager::getInstance();
+            char lat[16], lon[16];
+            snprintf(lat, sizeof(lat), "%.6f", sensors.getLatitude());
+            snprintf(lon, sizeof(lon), "%.6f", sensors.getLongitude());
+
+            String phone = Storage::getInstance().getString(NVS_KEY_PHONE, DEFAULT_EMERGENCY_PHONE);
+            if (phone.length() == 0) phone = DEFAULT_EMERGENCY_PHONE;
+
+            const char* sessionId = SafetyEngine::getInstance().getSOSManager().getSessionId();
+            Serial.printf("[MAIN] 📡 Dispatching SOS: phone=%s session=%s\n", phone.c_str(), sessionId);
+
+            SOSRouting::getInstance().sendSOS(
+                phone.c_str(),
+                sessionId,
+                lat, lon,
+                sensors.getBPM()
+            );
+            break;
+        }
+
+        case SafetyState::IDLE: {
+            Serial.println("[MAIN] Safety State: IDLE");
+            ui.showSOSOverlay(false);
+
+            if (message && strstr(message, "SOS stopped") != nullptr) {
+                const char* sessionId = SafetyEngine::getInstance().getSOSManager().getSessionId();
+                Serial.printf("[MAIN] 🛑 Stopping SOS on network: session=%s\n", sessionId);
+                SOSRouting::getInstance().stopSOS(sessionId);
+            }
+            break;
+        }
+
+        case SafetyState::SOS_COUNTDOWN:
+            Serial.println("[MAIN] ⚠️ Fall countdown active!");
+            Vibration::getInstance().play(HapticPattern::WARNING);
+            break;
+
+        case SafetyState::ACTIVITY_MODE:
+            Serial.println("[MAIN] Activity Mode Active");
+            ui.showScreen(Screen::WATCHFACE);
+            break;
+    }
+}
+
+// Task handles for watchdog monitoring
+static TaskHandle_t s_taskSafety = nullptr;
+static TaskHandle_t s_taskSensor = nullptr;
+static TaskHandle_t s_taskUI = nullptr;
 
 // ============================================================================
-// Safety Engine Task (Core 0 — Highest Priority)
-// This task MUST keep running even if other tasks fail
+// FreeRTOS Task Functions
 // ============================================================================
+
 void taskSafety(void* parameter) {
-    Serial.println("[TASK] Safety engine started on Core 0");
-
-    while (true) {
+    Serial.println("[TASK] Safety engine started (Core 0)");
+    for (;;) {
         SafetyEngine::getInstance().update();
         Watchdog::getInstance().feed("safety");
-        vTaskDelay(pdMS_TO_TICKS(20)); // 50Hz
+        vTaskDelay(pdMS_TO_TICKS(20));  // 50Hz
     }
 }
 
-// ============================================================================
-// Sensor Reading Task (Core 0)
-// ============================================================================
 void taskSensor(void* parameter) {
-    Serial.println("[TASK] Sensor reading started on Core 0");
-
-    while (true) {
+    Serial.println("[TASK] Sensor manager started (Core 0)");
+    for (;;) {
         SensorManager::getInstance().update();
         Watchdog::getInstance().feed("sensor");
-        vTaskDelay(pdMS_TO_TICKS(20)); // 50Hz
+        vTaskDelay(pdMS_TO_TICKS(10));  // 100Hz for responsive HR updates
     }
 }
 
-// ============================================================================
-// U8g2 UI Task (Core 1)
-// ============================================================================
 void taskUI(void* parameter) {
-    Serial.println("[TASK] U8g2 UI started on Core 1");
-
-    while (true) {
+    Serial.println("[TASK] UI manager started (Core 1)");
+    for (;;) {
         UIManager::getInstance().update();
-        Vibration::getInstance().update();
-        PowerManager::getInstance().update();
         Watchdog::getInstance().feed("ui");
         vTaskDelay(pdMS_TO_TICKS(UI_TICK_MS));
     }
 }
 
-// ============================================================================
-// BLE Task (Core 0)
-// ============================================================================
 void taskBLE(void* parameter) {
-    Serial.println("[TASK] BLE task started on Core 0");
-
-    while (true) {
+    Serial.println("[TASK] BLE service started (Core 0)");
+    for (;;) {
         BleService::getInstance().update();
-        Watchdog::getInstance().feed("ble");
-        vTaskDelay(pdMS_TO_TICKS(100)); // 10Hz
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
-// ============================================================================
-// Communication Task (Core 1)
-// Handles WiFi, HTTP, phone bridge, SOS routing
-// ============================================================================
 void taskComms(void* parameter) {
-    Serial.println("[TASK] Communication task started on Core 1");
-
-    while (true) {
-        // Phone bridge periodic updates
+    Serial.println("[TASK] Comms manager started (Core 1)");
+    for (;;) {
         PhoneBridge::getInstance().update();
-
-        // System monitor
         SystemMonitor::getInstance().update();
 
-        // Watchdog supervisor
-        Watchdog::getInstance().check();
-
-        // If SOS is active, handle live updates via routing
-        SafetyEngine& safety = SafetyEngine::getInstance();
-        if (safety.isSOSActive()) {
-            SOSManager& sos = safety.getSOSManager();
-            SensorManager& sensors = SensorManager::getInstance();
-
-            // Check if it's time for a live update
-            static uint32_t lastSOSCommsUpdate = 0;
-            if (millis() - lastSOSCommsUpdate >= SOS_LIVE_UPDATE_INTERVAL_MS) {
-                lastSOSCommsUpdate = millis();
-
-                char lat[16], lon[16];
-                sensors.getGPS().getLatStr(lat, sizeof(lat));
-                sensors.getGPS().getLonStr(lon, sizeof(lon));
-
-                String phone = Storage::getInstance().getString(NVS_KEY_PHONE, "");
-
-                SOSRouting::getInstance().sendLiveUpdate(
-                    phone.c_str(),
-                    sos.getSessionId(),
-                    lat, lon,
-                    sensors.getBPM()
-                );
-            }
-        }
-
-        Watchdog::getInstance().feed("comms");
-        vTaskDelay(pdMS_TO_TICKS(500)); // 2Hz
-    }
-}
-
-// ============================================================================
-// BLE Message Handler (called from BLE RX interrupt context)
-// ============================================================================
-void onBleMessage(const char* data, size_t len) {
-    BleProtocol::getInstance().handleMessage(data, len);
-}
-
-// ============================================================================
-// Safety Event Handler (called when safety state changes)
-// ============================================================================
-void onSafetyEvent(SafetyState state, const char* message) {
-    UIManager& ui = UIManager::getInstance();
-
-    switch (state) {
-        case SafetyState::SOS_ACTIVE:
-            ui.showSOSOverlay(true);
-
-            // Trigger SOS via routing
-            {
+        // If SOS is active, periodically push live updates
+        if (SafetyEngine::getInstance().isSOSActive()) {
+            static uint32_t s_lastLiveUpdate = 0;
+            if (millis() - s_lastLiveUpdate >= SOS_LIVE_UPDATE_INTERVAL_MS) {
+                s_lastLiveUpdate = millis();
                 SensorManager& sensors = SensorManager::getInstance();
                 char lat[16], lon[16];
-                sensors.getGPS().getLatStr(lat, sizeof(lat));
-                sensors.getGPS().getLonStr(lon, sizeof(lon));
-                String phone = Storage::getInstance().getString(NVS_KEY_PHONE, "");
+                snprintf(lat, sizeof(lat), "%.6f", sensors.getLatitude());
+                snprintf(lon, sizeof(lon), "%.6f", sensors.getLongitude());
 
-                SOSRouting::getInstance().sendSOS(
+                String phone = Storage::getInstance().getString(NVS_KEY_PHONE, DEFAULT_EMERGENCY_PHONE);
+                if (phone.length() == 0) phone = DEFAULT_EMERGENCY_PHONE;
+
+                SOSRouting::getInstance().sendLiveUpdate(
                     phone.c_str(),
                     SafetyEngine::getInstance().getSOSManager().getSessionId(),
                     lat, lon,
                     sensors.getBPM()
                 );
             }
-            break;
+        }
 
-        case SafetyState::IDLE:
-            ui.showSOSOverlay(false);
-            break;
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
 
-        case SafetyState::SOS_COUNTDOWN:
-            // Show countdown on screen
-            // TODO: Create countdown overlay
-            break;
+// Set baseline system RTC from compile timestamp (__DATE__, __TIME__) in IST (+5:30)
+// Guarantees system clock is immediately valid and within seconds of real time
+// even before or without WiFi NTP sync, ensuring uptime is never shown.
+static void initCompileTimeBaseline() {
+    setenv("TZ", "IST-5:30", 1);
+    tzset();
 
-        case SafetyState::ACTIVITY_MODE:
-            // Activity indicator handled by watchface screen
-            break;
+    const char* months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    char s_month[5];
+    int month = 0, day = 1, year = 2026;
+    int hour = 0, min = 0, sec = 0;
+
+    if (sscanf(__DATE__, "%s %d %d", s_month, &day, &year) == 3 &&
+        sscanf(__TIME__, "%d:%d:%d", &hour, &min, &sec) == 3) {
+        for (int i = 0; i < 12; i++) {
+            if (strncmp(s_month, months[i], 3) == 0) {
+                month = i;
+                break;
+            }
+        }
+        struct tm t = {};
+        t.tm_year = year - 1900;
+        t.tm_mon = month;
+        t.tm_mday = day;
+        t.tm_hour = hour;
+        t.tm_min = min;
+        t.tm_sec = sec;
+        t.tm_isdst = 0;
+        time_t compileEpoch = mktime(&t);
+        if (compileEpoch > 0) {
+            struct timeval tv = { .tv_sec = compileEpoch, .tv_usec = 0 };
+            settimeofday(&tv, nullptr);
+            Serial.printf("[RTC] Baseline compile time: %02d:%02d:%02d %02d/%02d/%04d (IST)\n",
+                          hour, min, sec, day, month + 1, year);
+        }
     }
 }
 
@@ -223,126 +284,224 @@ void setup() {
     delay(500);
 
     Serial.println();
-    Serial.println("+===========================================+");
-    Serial.println("|                                           |");
-    Serial.println("|    SURAKSHA+ WATCH OS v" WATCH_OS_VERSION "             |");
-    Serial.println("|    Target: XIAO ESP32S3                   |");
-    Serial.println("|    Display: SH1106 128x64 OLED            |");
-    Serial.println("|                                           |");
-    Serial.println("+===========================================+");
+    Serial.println("╔══════════════════════════════════════════╗");
+    Serial.println("║  Suraksha+ Watch OS v" WATCH_OS_VERSION "               ║");
+    Serial.println("║  LilyGo T-Watch S3 + Seeed HR Sensor    ║");
+    Serial.println("╚══════════════════════════════════════════╝");
     Serial.println();
 
-    // === 1. Platform Init ===
-    Serial.println("-- Phase 1: Platform --");
+    // --- Global I2C mutex ---
+    g_i2cMutex = xSemaphoreCreateMutex();
+
+    // --- 1. Platform Init ---
+    Serial.println("[BOOT] 1/7 Platform...");
+    initCompileTimeBaseline();
     Storage::getInstance().init();
     Watchdog::getInstance().init();
     PowerManager::getInstance().init();
     SystemMonitor::getInstance().init();
 
-    // === 2. Hardware Init ===
-    Serial.println("\n-- Phase 2: Hardware --");
-
-    // I2C for OLED display + sensors (shared bus)
+    // --- 2. Hardware Init (I2C & PMU) ---
+    Serial.println("[BOOT] 2/7 Hardware (I2C & PMU)...");
     Wire.begin(PIN_SENSOR_SDA, PIN_SENSOR_SCL);
     Wire.setClock(I2C_SPEED);
-    Serial.printf("[I2C] Bus initialized: SDA=%d, SCL=%d @ %dHz\n",
-                  PIN_SENSOR_SDA, PIN_SENSOR_SCL, I2C_SPEED);
+    Wire.setTimeOut(50); // Prevent infinite bus freeze on unACKed transactions
 
-    // === 3. Driver Init ===
-    Serial.println("\n-- Phase 3: Drivers --");
+    // Power up display logic and backlight rails via AXP2101
+    initPMU();
+
+    // Enable TFT backlight
+#if defined(PIN_TFT_BL) && PIN_TFT_BL >= 0
+    pinMode(PIN_TFT_BL, OUTPUT);
+    digitalWrite(PIN_TFT_BL, HIGH);
+#endif
+
+    // --- 3. Driver Init ---
+    Serial.println("[BOOT] 3/7 Drivers...");
+    DisplayDriver::getInstance().init();
     Vibration::getInstance().init();
-    Buzzer::getInstance().init();
 
-    // Boot vibration
-    Vibration::getInstance().play(HapticPattern::SUCCESS);
+    // --- 4. NTP Time Sync (IST UTC+5:30) via WiFi ---
+    Serial.println("[BOOT] 4/8 NTP Time Sync (IST +5:30)...");
 
-    // === 4. Sensor Init ===
-    Serial.println("\n-- Phase 4: Sensors --");
+    // Display boot splash on watch
+    auto* canvas = DisplayDriver::getInstance().getCanvas();
+    if (canvas) {
+        canvas->fillScreen(TFT_BLACK);
+        canvas->setTextDatum(MC_DATUM);
+        canvas->setTextColor(0x07FF, TFT_BLACK);
+        canvas->drawString("SURAKSHA+ OS", 120, 50, 4);
+        canvas->setTextColor(TFT_WHITE, TFT_BLACK);
+        canvas->drawString("Connecting WiFi...", 120, 105, 2);
+        canvas->setTextColor(0x07FF, TFT_BLACK);
+        canvas->drawString(WIFI_SSID, 120, 130, 2);
+        canvas->setTextColor(TFT_DARKGREY, TFT_BLACK);
+        canvas->drawString("Syncing IST Time...", 120, 165, 2);
+        DisplayDriver::getInstance().flush();
+    }
+
+    if (WifiManager::getInstance().connect(WIFI_CONNECT_TIMEOUT_MS)) {
+        bool synced = WifiManager::getInstance().syncTime();
+        // Keep WiFi connected for instant SOS dispatch & live audio streaming
+        // (WifiManager::getInstance().disconnect() removed so watch remains online)
+
+        if (canvas) {
+            canvas->fillScreen(TFT_BLACK);
+            canvas->setTextDatum(MC_DATUM);
+            canvas->setTextColor(TFT_GREEN, TFT_BLACK);
+            canvas->drawString("SURAKSHA+ OS", 120, 50, 4);
+            canvas->setTextColor(TFT_WHITE, TFT_BLACK);
+            canvas->drawString(synced ? "Time Synced (IST)" : "WiFi Connected", 120, 105, 2);
+
+            time_t now = time(nullptr);
+            struct tm* t = localtime(&now);
+            if (t) {
+                int h12 = t->tm_hour % 12;
+                if (h12 == 0) h12 = 12;
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%02d:%02d %s", h12, t->tm_min, (t->tm_hour >= 12) ? "PM" : "AM");
+                canvas->setTextColor(0x07FF, TFT_BLACK);
+                canvas->drawString(buf, 120, 138, 4);
+            }
+            DisplayDriver::getInstance().flush();
+            delay(800);
+        }
+    } else {
+        Serial.println("[BOOT] WiFi offline. Continuing with baseline clock.");
+        setenv("TZ", "IST-5:30", 1);
+        tzset();
+        if (canvas) {
+            canvas->fillScreen(TFT_BLACK);
+            canvas->setTextDatum(MC_DATUM);
+            canvas->setTextColor(0x07FF, TFT_BLACK);
+            canvas->drawString("SURAKSHA+ OS", 120, 50, 4);
+            canvas->setTextColor(TFT_YELLOW, TFT_BLACK);
+            canvas->drawString("WiFi Offline", 120, 95, 2);
+            bool found = WifiManager::getInstance().wasSSIDFound();
+            if (!found) {
+                canvas->drawString("Hotspot Not Found", 120, 118, 2);
+                canvas->setTextColor(TFT_WHITE, TFT_BLACK);
+                canvas->drawString("Enable 2.4GHz on Phone", 120, 140, 2);
+            } else {
+                canvas->drawString("Hotspot Detected", 120, 118, 2);
+                canvas->setTextColor(TFT_WHITE, TFT_BLACK);
+                canvas->drawString("Check Password / DHCP", 120, 140, 2);
+            }
+            canvas->setTextColor(TFT_DARKGREY, TFT_BLACK);
+            canvas->drawString("Starting Watch...", 120, 170, 2);
+            DisplayDriver::getInstance().flush();
+            delay(2000);
+        }
+    }
+
+    // --- 5. ESP-NOW Receiver Init (on ESPNOW_WIFI_CHANNEL) ---
+    Serial.println("[BOOT] 5/8 ESP-NOW receiver...");
+    ESPNowReceiver::getInstance().init();
+
+    // --- 6. Sensor Init ---
+    Serial.println("[BOOT] 6/8 Sensors...");
     SensorManager::getInstance().init();
 
-    // === 5. Safety Engine Init ===
-    Serial.println("\n-- Phase 5: Safety Engine --");
+    // --- 7. Safety Engine Init ---
+    Serial.println("[BOOT] 7/8 Safety engine...");
     SafetyEngine::getInstance().init();
     SafetyEngine::getInstance().setEventCallback(onSafetyEvent);
 
-    // === 6. Communication Init ===
-    Serial.println("\n-- Phase 6: Communication --");
+    // --- 8. Communication Init ---
+    Serial.println("[BOOT] 8/8 Communication...");
     BleService::getInstance().init();
-    BleService::getInstance().onReceive(onBleMessage);
     BleProtocol::getInstance().init();
     PhoneBridge::getInstance().init();
 
-    // === 7. UI Init ===
-    Serial.println("\n-- Phase 7: UI --");
+    // --- UI Init ---
     UIManager::getInstance().init();
 
-    // === 8. Start FreeRTOS Tasks ===
-    Serial.println("\n-- Phase 8: FreeRTOS Tasks --");
+    // --- Start FreeRTOS Tasks ---
+    Serial.println("[BOOT] Starting FreeRTOS tasks...");
 
-    xTaskCreatePinnedToCore(taskSafety, "safety", TASK_STACK_SAFETY,
-                            NULL, TASK_PRIORITY_SAFETY, &taskSafetyHandle, TASK_CORE_SAFETY);
+    xTaskCreatePinnedToCore(taskSafety, "safety",
+        TASK_STACK_SAFETY, NULL, TASK_PRIORITY_SAFETY, &s_taskSafety, TASK_CORE_SAFETY);
 
-    xTaskCreatePinnedToCore(taskSensor, "sensor", TASK_STACK_SENSOR,
-                            NULL, TASK_PRIORITY_SENSOR, &taskSensorHandle, TASK_CORE_SENSOR);
+    xTaskCreatePinnedToCore(taskSensor, "sensor",
+        TASK_STACK_SENSOR, NULL, TASK_PRIORITY_SENSOR, &s_taskSensor, TASK_CORE_SENSOR);
 
-    xTaskCreatePinnedToCore(taskUI, "ui", TASK_STACK_UI,
-                            NULL, TASK_PRIORITY_UI, &taskUIHandle, TASK_CORE_UI);
+    xTaskCreatePinnedToCore(taskUI, "ui",
+        TASK_STACK_UI, NULL, TASK_PRIORITY_UI, &s_taskUI, TASK_CORE_UI);
 
-    xTaskCreatePinnedToCore(taskBLE, "ble", TASK_STACK_BLE,
-                            NULL, TASK_PRIORITY_BLE, &taskBLEHandle, TASK_CORE_BLE);
+    xTaskCreatePinnedToCore(taskBLE, "ble",
+        TASK_STACK_BLE, NULL, TASK_PRIORITY_BLE, NULL, TASK_CORE_BLE);
 
-    xTaskCreatePinnedToCore(taskComms, "comms", TASK_STACK_COMMS,
-                            NULL, TASK_PRIORITY_COMMS, &taskCommsHandle, TASK_CORE_COMMS);
+    xTaskCreatePinnedToCore(taskComms, "comms",
+        TASK_STACK_COMMS, NULL, TASK_PRIORITY_COMMS, NULL, TASK_CORE_COMMS);
 
     // Register tasks with watchdog
-    Watchdog& wdt = Watchdog::getInstance();
-    wdt.registerTask("safety", taskSafetyHandle, WDT_TASK_TIMEOUT_MS);
-    wdt.registerTask("sensor", taskSensorHandle, WDT_TASK_TIMEOUT_MS);
-    wdt.registerTask("ui", taskUIHandle, WDT_TASK_TIMEOUT_MS * 2);
-    wdt.registerTask("ble", taskBLEHandle, WDT_TASK_TIMEOUT_MS * 3);
-    wdt.registerTask("comms", taskCommsHandle, WDT_TASK_TIMEOUT_MS * 3);
+    Watchdog::getInstance().registerTask("safety", s_taskSafety, 5000);
+    Watchdog::getInstance().registerTask("sensor", s_taskSensor, 5000);
+    Watchdog::getInstance().registerTask("ui", s_taskUI, 5000);
 
     Serial.println();
-    Serial.println("+===========================================+");
-    Serial.println("|    SURAKSHA+ WATCH OS READY               |");
-    Serial.printf("|    Free Heap: %6d bytes                 |\n", ESP.getFreeHeap());
-    Serial.printf("|    Free PSRAM: %5d KB                    |\n", ESP.getFreePsram() / 1024);
-    Serial.println("+===========================================+");
+    Serial.printf("[BOOT] ✅ System ready! Free heap: %d bytes\n", ESP.getFreeHeap());
+    Serial.printf("[BOOT] PSRAM: %d bytes free\n", ESP.getFreePsram());
+    Serial.println("[BOOT] Waiting for HR sensor module via ESP-NOW...");
+    Serial.println();
+
+    // Boot vibration
+    Vibration::getInstance().play(HapticPattern::SUCCESS);
 }
 
 // ============================================================================
-// LOOP (not used — all work is done in FreeRTOS tasks)
+// LOOP (mostly idle — FreeRTOS tasks handle everything)
 // ============================================================================
 void loop() {
-    // Arduino loop runs as lowest-priority task
-    // We use it for serial debug commands only
+    // Non-blocking vibration pattern update
+    Vibration::getInstance().update();
 
+    // Serial debug commands
     if (Serial.available()) {
         char cmd = Serial.read();
         switch (cmd) {
-            case 's': // Manual SOS trigger
+            case 's':
                 Serial.println("[DEBUG] Manual SOS trigger");
-                SafetyEngine::getInstance().triggerSOS("DEBUG_SERIAL");
+                SafetyEngine::getInstance().triggerSOS("MANUAL");
                 break;
-            case 'x': // Manual SOS stop
-                Serial.println("[DEBUG] Manual SOS stop");
+            case 'x':
+                Serial.println("[DEBUG] Stop SOS");
                 SafetyEngine::getInstance().stopSOS();
                 break;
-            case 'a': // Toggle activity mode
+            case 'a':
+                Serial.println("[DEBUG] Toggle activity mode");
                 if (SafetyEngine::getInstance().isActivityMode()) {
                     SafetyEngine::getInstance().stopActivityMode();
                 } else {
-                    SafetyEngine::getInstance().startActivityMode(300); // 5 min
+                    SafetyEngine::getInstance().startActivityMode(300);
                 }
                 break;
-            case 'i': // System info
-                SystemMonitor::getInstance().printStatus();
+            case 'i': {
+                Serial.println("[DEBUG] System Status:");
+                Serial.printf("  Heap: %d | PSRAM: %d\n",
+                              ESP.getFreeHeap(), ESP.getFreePsram());
+                auto& sm = SensorManager::getInstance();
+                Serial.printf("  HR: BPM=%.1f SpO2=%.0f%% Online=%s RSSI=%d\n",
+                              sm.getBPM(), sm.getSpO2(),
+                              sm.isHRSensorOnline() ? "YES" : "NO",
+                              sm.getHRSensorRSSI());
+                Serial.printf("  IMU: Motion=%.2f Steps=%d\n",
+                              sm.getMotionScore(), sm.getSteps());
+                Serial.printf("  Battery: %d%% Charging=%s\n",
+                              sm.getBatteryPercent(),
+                              sm.isBatteryCharging() ? "YES" : "NO");
+                auto& espnow = ESPNowReceiver::getInstance();
+                Serial.printf("  ESP-NOW: Packets=%d\n",
+                              espnow.getPacketsReceived());
                 break;
-            case 'r': // Restart
-                PowerManager::getInstance().restart();
+            }
+            case 'r':
+                Serial.println("[DEBUG] Restarting...");
+                delay(100);
+                ESP.restart();
                 break;
         }
     }
 
-    vTaskDelay(pdMS_TO_TICKS(1000)); // Low-priority idle
+    delay(50);
 }

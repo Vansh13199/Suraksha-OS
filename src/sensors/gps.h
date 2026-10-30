@@ -37,6 +37,9 @@ public:
     // Get formatted coordinate strings (for SOS API)
     void getLatStr(char* buf, size_t len) const;
     void getLonStr(char* buf, size_t len) const;
+    
+    // Reset to hardcoded default coordinates
+    void resetToDefault();
 
     bool hasFix() const { return _data.hasFix; }
     bool isStale() const;   // True if data is older than 30s

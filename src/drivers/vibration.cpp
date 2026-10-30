@@ -8,12 +8,46 @@ Vibration& Vibration::getInstance() {
     return instance;
 }
 
+#include <Wire.h>
+#include "../config/hardware_config.h"
+
 void Vibration::init() {
+#if defined(PIN_VIBRATION) && PIN_VIBRATION >= 0
     ledcSetup(VIBRATION_PWM_CHANNEL, VIBRATION_PWM_FREQ, VIBRATION_PWM_RES);
     ledcAttachPin(PIN_VIBRATION, VIBRATION_PWM_CHANNEL);
     ledcWrite(VIBRATION_PWM_CHANNEL, 0);
+#endif
 
-    Serial.println("[VIB] Vibration motor initialized");
+    // Check for DRV2605 haptic driver on main I2C bus (address 0x5A)
+    if (!g_i2cMutex || xSemaphoreTake(g_i2cMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        Wire.beginTransmission(DRV2605_I2C_ADDR);
+        if (Wire.endTransmission() == 0) {
+            _hasDRV2605 = true;
+
+            // Wake from standby & set Real-Time Playback (RTP) mode
+            Wire.beginTransmission(DRV2605_I2C_ADDR);
+            Wire.write(0x01); // Mode register
+            Wire.write(0x05); // Real-Time Playback mode
+            Wire.endTransmission();
+
+            // Select ERM library
+            Wire.beginTransmission(DRV2605_I2C_ADDR);
+            Wire.write(0x03); // Library selection
+            Wire.write(0x01); // Library 1 (ERM)
+            Wire.endTransmission();
+
+            // RTP input initial value = 0 (off)
+            Wire.beginTransmission(DRV2605_I2C_ADDR);
+            Wire.write(0x02); // RTP input register
+            Wire.write(0x00);
+            Wire.endTransmission();
+
+            Serial.println("[VIB] ✅ DRV2605 Haptic Motor Driver initialized (I2C 0x5A)");
+        } else {
+            Serial.println("[VIB] ⚠️ DRV2605 not found at 0x5A, using GPIO fallback");
+        }
+        if (g_i2cMutex) xSemaphoreGive(g_i2cMutex);
+    }
 }
 
 void Vibration::play(HapticPattern pattern) {
@@ -33,7 +67,10 @@ void Vibration::play(HapticPattern pattern) {
             pulse(50, 80, 3);
             break;
         case HapticPattern::SOS_CONFIRM:
-            pulse(500);
+            continuous(2000);
+            break;
+        case HapticPattern::SOS_STOP:
+            continuous(1000);
             break;
         case HapticPattern::SOS_ACTIVE_PULSE:
             pulse(200, 300, 3);
@@ -48,7 +85,7 @@ void Vibration::play(HapticPattern pattern) {
             pulse(80, 80, 3);
             break;
         case HapticPattern::SUCCESS:
-            pulse(100, 100, 2);
+            pulse(300, 300, 2);
             break;
         case HapticPattern::WARNING:
             pulse(400);
@@ -57,10 +94,10 @@ void Vibration::play(HapticPattern pattern) {
             pulse(30);
             break;
         case HapticPattern::ACTIVITY_ON:
-            pulse(200, 200, 4);   // Match existing: vibratePulse(4, 200, 200)
+            pulse(500, 500, 2);
             break;
         case HapticPattern::ACTIVITY_OFF:
-            pulse(200, 200, 3);   // Match existing: vibratePulse(3, 200, 200)
+            pulse(500, 500, 2);
             break;
         case HapticPattern::IDENTITY_SYNC:
             pulse(100, 100, 2);   // Match existing: vibratePulse(2, 100, 100)
@@ -133,11 +170,36 @@ void Vibration::update() {
 
 void Vibration::_motorOn() {
     if (!_enabled) return;
+
+    if (_hasDRV2605) {
+        if (!g_i2cMutex || xSemaphoreTake(g_i2cMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+            Wire.beginTransmission(DRV2605_I2C_ADDR);
+            Wire.write(0x02); // RTP input register
+            Wire.write((uint8_t)0x7F); // Full power
+            Wire.endTransmission();
+            if (g_i2cMutex) xSemaphoreGive(g_i2cMutex);
+        }
+    }
+
+#if defined(PIN_VIBRATION) && PIN_VIBRATION >= 0
     ledcWrite(VIBRATION_PWM_CHANNEL, _intensity);
+#endif
     _motorActive = true;
 }
 
 void Vibration::_motorOff() {
+    if (_hasDRV2605) {
+        if (!g_i2cMutex || xSemaphoreTake(g_i2cMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+            Wire.beginTransmission(DRV2605_I2C_ADDR);
+            Wire.write(0x02); // RTP input register
+            Wire.write((uint8_t)0x00); // Stop
+            Wire.endTransmission();
+            if (g_i2cMutex) xSemaphoreGive(g_i2cMutex);
+        }
+    }
+
+#if defined(PIN_VIBRATION) && PIN_VIBRATION >= 0
     ledcWrite(VIBRATION_PWM_CHANNEL, 0);
+#endif
     _motorActive = false;
 }

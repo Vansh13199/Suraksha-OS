@@ -1,6 +1,6 @@
 // ============================================================================
 // Suraksha+ Watch OS — Display Driver Implementation
-// SH1106 128x64 OLED via U8g2 (I2C)
+// ST7789 240x240 TFT via TFT_eSPI — LilyGo T-Watch S3
 // ============================================================================
 #include "display_driver.h"
 
@@ -10,53 +10,86 @@ DisplayDriver& DisplayDriver::getInstance() {
 }
 
 void DisplayDriver::init() {
-    Serial.println("[DISP] Initializing SH1106 128x64 OLED...");
-    Serial.printf("[DISP] I2C pins: SDA=%d, SCL=%d, Addr=0x%02X\n",
-                  PIN_SENSOR_SDA, PIN_SENSOR_SCL, OLED_I2C_ADDR);
+    if (_poweredOn) return; // Prevent double initialization
 
-    // Use the Wire instance that was already initialized with correct pins
-    // U8g2 begin() would call Wire.begin() with default pins, so we use
-    // setBusClock + begin explicitly to keep our pin configuration
-    _u8g2.setI2CAddress(OLED_I2C_ADDR * 2); // U8g2 uses 8-bit I2C address
-    _u8g2.begin();
+    Serial.println("[DISP] Initializing ST7789 240x240 TFT via TFT_eSPI...");
 
-    // Re-initialize Wire with our pins since U8g2 begin() may override them
-    Wire.begin(PIN_SENSOR_SDA, PIN_SENSOR_SCL);
-    Wire.setClock(I2C_SPEED);
+    // Direct GPIO control for backlight to guarantee it stays ON
+#if defined(PIN_TFT_BL) && PIN_TFT_BL >= 0
+    pinMode(PIN_TFT_BL, OUTPUT);
+    digitalWrite(PIN_TFT_BL, HIGH);
+#endif
 
-    // Set default contrast
-    _u8g2.setContrast(_contrast);
+    // Initialize TFT_eSPI
+    _tft.init();
+    _tft.setRotation(2); // 180° rotation — right-side up on T-Watch S3
+    _tft.invertDisplay(true);
 
-    // Clear and show a brief splash
-    _u8g2.clearBuffer();
-    _u8g2.setFont(u8g2_font_6x10_tr);
-    _u8g2.drawStr(18, 28, "SURAKSHA+ OS");
-    _u8g2.drawStr(30, 42, "v" "1.0.0");
-    _u8g2.sendBuffer();
+    // Initialize double-buffer sprite in PSRAM to eliminate all flickering
+    _spr.setColorDepth(16);
+    void* ptr = _spr.createSprite(DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    if (ptr) {
+        _hasSprite = true;
+        Serial.println("[DISP] ✅ Double-buffer PSRAM sprite created (240x240, 16-bit)");
+    } else {
+        _hasSprite = false;
+        Serial.println("[DISP] ⚠️ Failed to create PSRAM sprite, falling back to direct TFT");
+    }
+
+    // Initial boot splash
+    TFT_eSPI* canvas = getCanvas();
+    canvas->fillScreen(TFT_NAVY);
+    canvas->setTextColor(TFT_CYAN, TFT_NAVY);
+    canvas->setTextDatum(MC_DATUM);
+    canvas->drawString("SURAKSHA+ OS", 120, 100, 4);
+    canvas->setTextColor(TFT_WHITE, TFT_NAVY);
+    canvas->drawString("LilyGo T-Watch S3", 120, 140, 2);
+    flush();
 
     _poweredOn = true;
 
-    Serial.printf("[DISP] ✅ SH1106 OLED initialized: %dx%d\n",
-                  DISPLAY_WIDTH, DISPLAY_HEIGHT);
+    Serial.printf("[DISP] ✅ ST7789 TFT initialized: %dx%d (Rotation: 2, Sprite: %s)\n",
+                  DISPLAY_WIDTH, DISPLAY_HEIGHT, _hasSprite ? "ENABLED" : "DISABLED");
+}
+
+TFT_eSPI* DisplayDriver::getCanvas() {
+    return _hasSprite ? static_cast<TFT_eSPI*>(&_spr) : &_tft;
+}
+
+void DisplayDriver::flush() {
+    if (_hasSprite) {
+        _spr.pushSprite(0, 0);
+    }
 }
 
 void DisplayDriver::powerOn() {
     if (!_poweredOn) {
-        _u8g2.setPowerSave(0);
+#if defined(PIN_TFT_BL) && PIN_TFT_BL >= 0
+        pinMode(PIN_TFT_BL, OUTPUT);
+        digitalWrite(PIN_TFT_BL, HIGH);
+#endif
+        _tft.writecommand(0x29); // ST7789 display ON command
         _poweredOn = true;
-        Serial.println("[DISP] OLED power ON");
+        Serial.println("[DISP] TFT power ON");
     }
 }
 
 void DisplayDriver::powerOff() {
     if (_poweredOn) {
-        _u8g2.setPowerSave(1);
+#if defined(PIN_TFT_BL) && PIN_TFT_BL >= 0
+        pinMode(PIN_TFT_BL, OUTPUT);
+        digitalWrite(PIN_TFT_BL, LOW);
+#endif
+        _tft.writecommand(0x28); // ST7789 display OFF command
         _poweredOn = false;
-        Serial.println("[DISP] OLED power OFF");
+        Serial.println("[DISP] TFT power OFF");
     }
 }
 
-void DisplayDriver::setContrast(uint8_t contrast) {
-    _contrast = contrast;
-    _u8g2.setContrast(contrast);
+void DisplayDriver::setBrightness(uint8_t brightness) {
+    _brightness = brightness;
+#if defined(PIN_TFT_BL) && PIN_TFT_BL >= 0
+    pinMode(PIN_TFT_BL, OUTPUT);
+    digitalWrite(PIN_TFT_BL, (brightness > 0) ? HIGH : LOW);
+#endif
 }

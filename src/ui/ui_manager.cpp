@@ -1,8 +1,10 @@
 // ============================================================================
 // Suraksha+ Watch OS — UI Manager Implementation
-// U8g2-based rendering for SH1106 128x64 OLED
+// TFT_eSPI-based rendering for LilyGo T-Watch S3 (240x240 ST7789)
 // ============================================================================
 #include "ui_manager.h"
+#include "../config/hardware_config.h"
+#include "../platform/power_manager.h"
 #include "screens/watchface_screen.h"
 #include "screens/sos_screen.h"
 #include "screens/health_screen.h"
@@ -22,7 +24,7 @@ UIManager& UIManager::getInstance() {
 }
 
 void UIManager::init() {
-    Serial.println("[UI] Initializing UI manager (U8g2)...");
+    Serial.println("[UI] Initializing UI manager (TFT_eSPI)...");
 
     // Initialize display driver
     DisplayDriver::getInstance().init();
@@ -32,61 +34,58 @@ void UIManager::init() {
     _currentScreen = Screen::WATCHFACE;
     _initialized = true;
 
-    Serial.println("[UI] ✅ UI manager ready (SH1106 128x64)");
+    Serial.println("[UI] ✅ UI manager ready (ST7789 240x240)");
 }
 
 void UIManager::update() {
     if (!_initialized) return;
 
-    U8G2_SH1106_128X64_NONAME_F_HW_I2C* u8g2 = DisplayDriver::getInstance().getU8g2();
-    if (!u8g2) return;
+    DisplayDriver& disp = DisplayDriver::getInstance();
+    TFT_eSPI* canvas = disp.getCanvas();
+    if (!canvas) return;
 
-    // Auto-cycle screens (unless SOS is active)
-    if (!_sosOverride) {
-        uint32_t now = millis();
-        if (now - _lastCycleMs >= SCREEN_CYCLE_MS) {
-            _lastCycleMs = now;
-            _cycleIndex = (_cycleIndex + 1) % SCREEN_CYCLE_COUNT;
-            _currentScreen = _cycleScreens[_cycleIndex];
-        }
-    }
+    // Screens stay on current screen unless swiped or triggered (No auto-cycling)
 
-    // Clear buffer
-    u8g2->clearBuffer();
-
-    // Draw the current screen
+    // Draw the current screen into offscreen PSRAM canvas
     switch (_currentScreen) {
         case Screen::WATCHFACE:
-            WatchfaceScreen::draw(u8g2);
+            WatchfaceScreen::draw(canvas);
             break;
 
         case Screen::SOS_ACTIVE:
-            SOSScreen::draw(u8g2);
+            SOSScreen::draw(canvas);
             break;
 
         case Screen::HEALTH:
-            HealthScreen::draw(u8g2);
+            HealthScreen::draw(canvas);
             break;
 
         case Screen::SYSTEM_INFO:
-            SystemInfoScreen::draw(u8g2);
+            SystemInfoScreen::draw(canvas);
             break;
     }
 
-    // Send buffer to OLED
-    u8g2->sendBuffer();
+    // Push frame to physical TFT in one single transfer (eliminates all flickering)
+    disp.flush();
 }
 
 void UIManager::showScreen(Screen screen) {
     _currentScreen = screen;
-    _lastCycleMs = millis(); // Reset cycle timer
 }
 
 void UIManager::nextScreen() {
     if (!_sosOverride) {
         _cycleIndex = (_cycleIndex + 1) % SCREEN_CYCLE_COUNT;
         _currentScreen = _cycleScreens[_cycleIndex];
-        _lastCycleMs = millis();
+        Serial.printf("[UI] ➡️ Swiped to next screen: %d\n", (int)_currentScreen);
+    }
+}
+
+void UIManager::prevScreen() {
+    if (!_sosOverride) {
+        _cycleIndex = (_cycleIndex + SCREEN_CYCLE_COUNT - 1) % SCREEN_CYCLE_COUNT;
+        _currentScreen = _cycleScreens[_cycleIndex];
+        Serial.printf("[UI] ⬅️ Swiped to previous screen: %d\n", (int)_currentScreen);
     }
 }
 

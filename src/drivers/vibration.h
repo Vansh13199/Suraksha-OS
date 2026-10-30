@@ -12,7 +12,8 @@ enum class HapticPattern {
     TAP,                // Single short pulse (50ms)
     DOUBLE_TAP,         // Two quick pulses
     TRIPLE_TAP,         // Three quick pulses
-    SOS_CONFIRM,        // Strong 500ms buzz
+    SOS_CONFIRM,        // Strong 2-second buzz
+    SOS_STOP,           // 1-second continuous buzz
     SOS_ACTIVE_PULSE,   // Periodic pulse during active SOS
     NOTIFICATION,       // Gentle double-pulse
     ALARM,              // Escalating pattern
@@ -58,6 +59,7 @@ private:
     uint8_t _intensity = 200;
     bool _enabled = true;
     bool _motorActive = false;
+    bool _hasDRV2605 = false;
 
     // Pattern playback state
     struct PatternState {

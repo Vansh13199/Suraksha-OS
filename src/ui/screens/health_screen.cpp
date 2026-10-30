@@ -1,73 +1,100 @@
 // ============================================================================
 // Suraksha+ Watch OS — Health Screen Implementation
-// 128x64 OLED layout using U8g2
+// 240x240 Color TFT layout for LilyGo T-Watch S3
 // ============================================================================
 #include "health_screen.h"
 #include "../../sensors/sensor_manager.h"
 
 namespace HealthScreen {
 
-    void draw(U8G2_SH1106_128X64_NONAME_F_HW_I2C* u8g2) {
+    void draw(TFT_eSPI* tft) {
+        if (!tft) return;
+
         SensorManager& sensors = SensorManager::getInstance();
 
-        // --- Title ---
-        u8g2->setFont(u8g2_font_6x10_tr);
-        u8g2->drawStr(0, 9, "HEART RATE");
-        u8g2->drawHLine(0, 11, 128);
+        tft->fillScreen(TFT_BLACK);
 
-        // --- BPM value (large) ---
+        // --- Header ---
+        tft->fillRect(0, 0, 240, 36, 0x10A2); // Deep navy header
+        tft->setTextDatum(MC_DATUM);
+        tft->setTextColor(TFT_CYAN, 0x10A2);
+        tft->drawString("HEALTH MONITOR", 120, 18, 4);
+
+        // --- Heart Rate Card ---
+        tft->fillRoundRect(10, 44, 220, 80, 8, 0x18E3);
+        tft->drawRoundRect(10, 44, 220, 80, 8, TFT_RED);
+
         float bpm = sensors.getBPM();
-        char bpmBuf[12];
+        char bpmBuf[16];
         if (bpm > 0) {
             snprintf(bpmBuf, sizeof(bpmBuf), "%.0f", bpm);
         } else {
             snprintf(bpmBuf, sizeof(bpmBuf), "--");
         }
 
-        u8g2->setFont(u8g2_font_logisoso20_tn);
-        int bpmWidth = u8g2->getStrWidth(bpmBuf);
-        u8g2->drawStr((128 - bpmWidth) / 2 - 10, 36, bpmBuf);
+        tft->setTextDatum(TL_DATUM);
+        tft->setTextColor(TFT_RED, 0x18E3);
+        tft->drawString("HEART RATE", 20, 52, 2);
 
-        // "BPM" label next to value
-        u8g2->setFont(u8g2_font_6x10_tr);
-        u8g2->drawStr((128 + bpmWidth) / 2 - 5, 36, "BPM");
+        // Large BPM number
+        tft->setTextDatum(MC_DATUM);
+        tft->drawString(bpmBuf, 100, 88, 6); // Large font
 
-        // Finger status
-        bool fingerOn = sensors.isHeartRateAvailable() && bpm > 0;
-        u8g2->setFont(u8g2_font_5x7_tr);
-        u8g2->drawStr(0, 36, fingerOn ? "ON" : "OFF");
+        tft->setTextDatum(TL_DATUM);
+        tft->setTextColor(TFT_WHITE, 0x18E3);
+        tft->drawString("BPM", 155, 80, 4);
 
-        // --- Separator ---
-        u8g2->drawHLine(0, 39, 128);
-
-        // --- Steps ---
-        uint32_t steps = sensors.getSteps();
-        char stepBuf[20];
-        snprintf(stepBuf, sizeof(stepBuf), "Steps: %d", steps);
-        u8g2->setFont(u8g2_font_6x10_tr);
-        u8g2->drawStr(0, 51, stepBuf);
-
-        // --- Motion score ---
-        float motion = sensors.getMotionScore();
-        char motBuf[20];
-        snprintf(motBuf, sizeof(motBuf), "Motion: %.2f", motion);
-        u8g2->drawStr(0, 63, motBuf);
-
-        // --- GPS status (right side) ---
-        if (sensors.hasGPSFix()) {
-            char gpsBuf[16];
-            snprintf(gpsBuf, sizeof(gpsBuf), "GPS OK");
-            u8g2->drawStr(88, 51, gpsBuf);
+        // Status indicator (SpO2 removed)
+        bool finger = sensors.isHRSensorFingerPresent();
+        tft->setTextDatum(TR_DATUM);
+        if (finger) {
+            tft->setTextColor(TFT_GREEN, 0x18E3);
+            tft->drawString("FINGER ON", 220, 52, 2);
+        } else if (bpm > 0) {
+            tft->setTextColor(TFT_YELLOW, 0x18E3);
+            tft->drawString("MAINTAINED", 220, 52, 2);
         } else {
-            u8g2->drawStr(82, 51, "No GPS");
+            tft->setTextColor(TFT_DARKGREY, 0x18E3);
+            tft->drawString("NO DATA", 220, 52, 2);
         }
 
-        // --- Battery (bottom-right) ---
-        uint8_t batPct = sensors.getBatteryPercent();
-        char batBuf[8];
-        snprintf(batBuf, sizeof(batBuf), "%d%%", batPct);
-        int w = u8g2->getStrWidth(batBuf);
-        u8g2->drawStr(128 - w, 63, batBuf);
+        // --- Steps & Motion Card ---
+        tft->fillRoundRect(10, 132, 220, 50, 8, 0x18E3);
+        tft->drawRoundRect(10, 132, 220, 50, 8, TFT_ORANGE);
+
+        uint32_t steps = sensors.getSteps();
+        char stepsBuf[24];
+        snprintf(stepsBuf, sizeof(stepsBuf), "Steps: %lu", (unsigned long)steps);
+        tft->setTextDatum(TL_DATUM);
+        tft->setTextColor(TFT_ORANGE, 0x18E3);
+        tft->drawString(stepsBuf, 20, 140, 2);
+
+        float motion = sensors.getMotionScore();
+        char motBuf[24];
+        snprintf(motBuf, sizeof(motBuf), "Motion: %.2f g", motion);
+        tft->setTextColor(TFT_YELLOW, 0x18E3);
+        tft->drawString(motBuf, 20, 160, 2);
+
+        // --- Remote Seeed Sensor Info Bar ---
+        bool online = sensors.isHRSensorOnline();
+        tft->fillRoundRect(10, 190, 220, 42, 8, 0x0841);
+        tft->drawRoundRect(10, 190, 220, 42, 8, online ? TFT_GREEN : TFT_DARKGREY);
+
+        tft->setTextDatum(TL_DATUM);
+        if (online) {
+            tft->setTextColor(TFT_GREEN, 0x0841);
+            tft->drawString("Seeed HR: LINKED", 20, 196, 2);
+            char linkInfo[36];
+            snprintf(linkInfo, sizeof(linkInfo), "Bat: %d%%  RSSI: %ddBm",
+                     sensors.getHRSensorBattery(), sensors.getHRSensorRSSI());
+            tft->setTextColor(TFT_WHITE, 0x0841);
+            tft->drawString(linkInfo, 20, 212, 2);
+        } else {
+            tft->setTextColor(TFT_ORANGE, 0x0841);
+            tft->drawString("Seeed HR: SEARCHING", 20, 196, 2);
+            tft->setTextColor(TFT_DARKGREY, 0x0841);
+            tft->drawString("Check sensor module power", 20, 212, 2);
+        }
     }
 
 } // namespace HealthScreen

@@ -3,45 +3,51 @@
 // ============================================================================
 #include "battery.h"
 
+// PMU battery helper declarations (from main.cpp)
+extern int getPMUBatteryPercent();
+extern uint16_t getPMUBatteryVoltage();
+extern bool isPMUCharging();
+
 bool BatterySensor::init() {
-    // Configure ADC
-    analogReadResolution(12);               // 12-bit ADC (0-4095)
-    analogSetAttenuation(ADC_11db);         // Full scale ~3.3V
+#if defined(PIN_BATTERY_ADC) && PIN_BATTERY_ADC >= 0
+    analogReadResolution(12);
+    analogSetAttenuation(ADC_11db);
     pinMode(PIN_BATTERY_ADC, INPUT);
+#endif
 
     // Initial reading
     update();
 
     _initialized = true;
-    Serial.printf("[BAT] ✅ Battery monitor initialized: %dmV (%d%%)\n",
-                  _data.voltage_mV, _data.percentage);
+    Serial.printf("[BAT] ✅ Battery monitor initialized: %dmV (%d%%, Charging: %s)\n",
+                  _data.voltage_mV, _data.percentage, _data.isCharging ? "YES" : "NO");
     return true;
 }
 
 void BatterySensor::update() {
-    uint16_t voltage = _readVoltage();
+    int pmuPct = getPMUBatteryPercent();
+    uint16_t pmuMv = getPMUBatteryVoltage();
+    bool charging = isPMUCharging();
 
-    // Add to averaging buffer
-    _voltageBuf[_bufIdx] = voltage;
-    _bufIdx = (_bufIdx + 1) % AVG_SAMPLES;
-    if (_bufCount < AVG_SAMPLES) _bufCount++;
-
-    // Calculate average voltage
-    uint32_t sum = 0;
-    for (int i = 0; i < _bufCount; i++) {
-        sum += _voltageBuf[i];
+    // Prefer PMU fuel gauge data (AXP2101)
+    if (pmuMv > 0) {
+        _data.voltage_mV = pmuMv;
+    } else {
+        _data.voltage_mV = _readVoltage();
     }
-    uint16_t avgVoltage = sum / _bufCount;
 
-    _data.voltage_mV = avgVoltage;
-    _data.percentage = _voltageToPercent(avgVoltage);
+    if (pmuPct >= 0 && pmuPct <= 100) {
+        _data.percentage = (uint8_t)pmuPct;
+    } else if (_data.voltage_mV > 3000) {
+        _data.percentage = _voltageToPercent(_data.voltage_mV);
+    } else {
+        _data.percentage = 100; // Default when powered via USB without battery
+    }
+
+    _data.isCharging = charging;
     _data.isLow = (_data.percentage <= BATTERY_LOW_PCT);
     _data.isCritical = (_data.percentage <= BATTERY_CRITICAL_PCT);
     _data.timestamp = millis();
-
-    // Charging detection: if voltage is above full charge
-    // (simple heuristic — better with dedicated charge IC status pin)
-    _data.isCharging = (avgVoltage > BATTERY_FULL_MV);
 }
 
 uint16_t BatterySensor::_readVoltage() {
