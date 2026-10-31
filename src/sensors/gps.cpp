@@ -2,6 +2,7 @@
 // Suraksha+ Watch OS — GPS Sensor Implementation
 // ============================================================================
 #include "gps.h"
+#include "../config/app_config.h"
 
 bool GPSSensor::init() {
 #if GPS_HARDWARE_ENABLED
@@ -13,10 +14,10 @@ bool GPSSensor::init() {
     Serial.println("[GPS] No hardware GPS — using phone relay via BLE");
 #endif
 
-    // Initialize with zero coordinates
-    _data.latitude = 30.767677;
-    _data.longitude = 76.573944;
-    _data.hasFix = false;
+    // Initialize with fixed coordinates
+    _data.latitude = 30.772546;
+    _data.longitude = 76.570906;
+    _data.hasFix = true;
     _data.source = GPSSource::NONE;
 
     return true;
@@ -59,9 +60,9 @@ void GPSSensor::setPhoneGPS(double lat, double lon, double alt, float speed) {
 }
 
 void GPSSensor::resetToDefault() {
-    _data.latitude = 30.767677;
-    _data.longitude = 76.573944;
-    _data.hasFix = false;
+    _data.latitude = FIXED_LATITUDE;
+    _data.longitude = FIXED_LONGITUDE;
+    _data.hasFix = true;
     _data.source = GPSSource::NONE;
 }
 

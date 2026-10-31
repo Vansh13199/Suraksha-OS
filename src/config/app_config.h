@@ -26,6 +26,12 @@
 #define DEFAULT_EMERGENCY_PHONE     "+918837578715"
 
 // ============================================================================
+// Fixed GPS Coordinates
+// ============================================================================
+#define FIXED_LATITUDE              30.772546
+#define FIXED_LONGITUDE             76.570906
+
+// ============================================================================
 // AWS API Endpoints
 // ============================================================================
 #define AWS_SOS_TRIGGER_URL     "https://uuanokhji9.execute-api.ap-south-1.amazonaws.com/prod/sos/trigger"

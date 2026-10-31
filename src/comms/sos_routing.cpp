@@ -29,46 +29,45 @@ SOSRoute SOSRouting::getBestRoute() const {
 bool SOSRouting::sendSOS(const char* phoneNumber, const char* sessionId,
                          const char* lat, const char* lon, float heartRate) {
     Serial.printf("[ROUTE] 🚨 sendSOS called: phone=%s session=%s\n", phoneNumber, sessionId);
-    bool sent = false;
 
-    // 1. If BLE mobile is connected, immediately notify mobile
+    // Priority 1: If BLE mobile is connected, dispatch to phone.
+    // The phone manages the single canonical SOS session (AWS + SMS + Emergency Calling).
+    // Do NOT send a second direct WiFi session to prevent duplicate sessions.
     if (BleService::getInstance().isConnected()) {
-        Serial.println("[ROUTE] 📱 Mobile BLE connected -> Dispatching via Bluetooth");
-        if (_sendViaBLE(sessionId, lat, lon)) {
-            sent = true;
-        }
+        Serial.println("[ROUTE] 📱 Mobile BLE connected -> Dispatching via Bluetooth (Phone manages session)");
+        return _sendViaBLE(sessionId, lat, lon);
     }
 
-    // 2. If WiFi is NOT connected, attempt immediate connection
+    // Priority 2: Standalone Mode (No phone connected via BLE) -> Send directly to AWS via WiFi
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("[ROUTE] 🌐 WiFi disconnected. Reconnecting to hotspot for SOS dispatch...");
+        Serial.println("[ROUTE] 🌐 WiFi disconnected. Connecting for standalone SOS dispatch...");
         WifiManager::getInstance().connect(4000);
     }
 
-    // 3. Send directly to AWS API via WiFi
     if (WiFi.status() == WL_CONNECTED) {
         Serial.println("[ROUTE] 🌐 WiFi connected -> Sending SOS directly to AWS API");
         if (_sendViaWiFi(phoneNumber, sessionId, lat, lon, heartRate)) {
-            sent = true;
             Serial.println("[ROUTE] ✅ SOS successfully dispatched to AWS!");
+            return true;
         }
-    } else if (!sent) {
-        Serial.println("[ROUTE] ⚠️ Neither WiFi nor Bluetooth connected — SOS queued locally");
+    } else {
+        Serial.println("[ROUTE] ⚠️ Neither Bluetooth nor WiFi connected — SOS queued locally");
     }
 
-    return sent;
+    return false;
 }
 
 bool SOSRouting::stopSOS(const char* sessionId) {
     Serial.printf("[ROUTE] 🛑 stopSOS called for session: %s\n", sessionId);
-    bool stopped = false;
 
+    // If BLE mobile is connected, notify mobile to stop the SOS session
     if (BleService::getInstance().isConnected()) {
         Serial.println("[ROUTE] 📱 Sending SOS:STOP to Mobile via Bluetooth");
         BleService::getInstance().send(BLE_MSG_SOS_STOP);
-        stopped = true;
+        return true;
     }
 
+    // Standalone Mode: Send STOP directly to AWS via WiFi
     if (WiFi.status() != WL_CONNECTED) {
         WifiManager::getInstance().connect(3000);
     }
@@ -77,22 +76,20 @@ bool SOSRouting::stopSOS(const char* sessionId) {
         Serial.println("[ROUTE] 🌐 Sending STOP to AWS via WiFi");
         char payload[128];
         snprintf(payload, sizeof(payload), "{\"sessionId\":\"%s\"}", sessionId);
-        if (_sendViaHTTP(AWS_SOS_STOP_URL, payload)) {
-            stopped = true;
-        }
+        return _sendViaHTTP(AWS_SOS_STOP_URL, payload);
     }
 
-    return stopped;
+    return false;
 }
 
 bool SOSRouting::sendLiveUpdate(const char* phoneNumber, const char* sessionId,
                                 const char* lat, const char* lon, float heartRate) {
-    if (WiFi.status() == WL_CONNECTED) {
-        return _sendViaWiFi(phoneNumber, sessionId, lat, lon, heartRate);
-    } else if (BleService::getInstance().isConnected()) {
+    if (BleService::getInstance().isConnected()) {
         BleService::getInstance().sendFormatted("SOS:UPDATE:%s,%s,%.1f",
                                                  lat, lon, heartRate);
         return true;
+    } else if (WiFi.status() == WL_CONNECTED) {
+        return _sendViaWiFi(phoneNumber, sessionId, lat, lon, heartRate);
     }
     return false;
 }
@@ -109,10 +106,10 @@ bool SOSRouting::_sendViaBLE(const char* sessionId, const char* lat, const char*
 
 bool SOSRouting::_sendViaWiFi(const char* phoneNumber, const char* sessionId,
                               const char* lat, const char* lon, float heartRate) {
-    double latitude = (lat && strlen(lat) > 0) ? atof(lat) : 30.767677;
-    double longitude = (lon && strlen(lon) > 0) ? atof(lon) : 76.573944;
-    if (latitude == 0.0) latitude = 30.767677;
-    if (longitude == 0.0) longitude = 76.573944;
+    double latitude = (lat && strlen(lat) > 0) ? atof(lat) : FIXED_LATITUDE;
+    double longitude = (lon && strlen(lon) > 0) ? atof(lon) : FIXED_LONGITUDE;
+    if (latitude == 0.0) latitude = FIXED_LATITUDE;
+    if (longitude == 0.0) longitude = FIXED_LONGITUDE;
 
     char payload[320];
     snprintf(payload, sizeof(payload),

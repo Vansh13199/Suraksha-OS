@@ -167,8 +167,8 @@ WiFiUDP udp;
 char udpBuffer[80]; // Reduced from 128
 
 // --- Use char arrays instead of Strings for GPS data ---
-char latestLat[16] = "30.767677";
-char latestLon[16] = "76.573944";
+char latestLat[16] = "30.772546";
+char latestLon[16] = "76.570906";
 
 // ---------------- ACTIVITY MODE ----------------
 bool activityMode = false;

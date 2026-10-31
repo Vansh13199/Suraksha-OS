@@ -148,13 +148,11 @@ bool SensorManager::hasGPSFix() const {
 }
 
 double SensorManager::getLatitude() const {
-    if (!GPS_HARDWARE_ENABLED) return 30.672342; // Default
-    return _gps.getData().latitude;
+    return FIXED_LATITUDE;
 }
 
 double SensorManager::getLongitude() const {
-    if (!GPS_HARDWARE_ENABLED) return 76.829631; // Default
-    return _gps.getData().longitude;
+    return FIXED_LONGITUDE;
 }
 
 // Remote sensor status
